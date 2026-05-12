@@ -1,55 +1,9 @@
-"""Standalone graph tokenization utilities extracted from AutoGraph.
-
-This file is self-contained (only depends on torch and numpy), so you can copy
-it into another project without importing anything from the AutoGraph package.
-
-Quick start (unlabeled graphs):
-    import torch
-    from graph_tokenization import GraphSequenceTokenizer, graph_to_tokens
-
-    edge_index = torch.tensor([[0, 1, 1], [1, 0, 2]], dtype=torch.long)
-    tokenizer = GraphSequenceTokenizer(max_length=-1, undirected=True)
-    tokenizer.set_num_nodes(3)
-
-    tokens = graph_to_tokens(edge_index=edge_index, num_nodes=3, tokenizer=tokenizer)
-    reconstructed_graph = tokenizer.decode(tokens)
-
-Quick start (labeled graphs):
-    import torch
-    from graph_tokenization import GraphSequenceTokenizer, SimpleGraphData
-
-    data = SimpleGraphData(
-        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
-        num_nodes=3,
-        x=torch.tensor([2, 0, 1], dtype=torch.long),         # node labels
-        edge_attr=torch.tensor([1, 3], dtype=torch.long),    # edge labels
-    )
-
-    tokenizer = GraphSequenceTokenizer(labeled_graph=True, undirected=True)
-    tokenizer.set_num_nodes(3)
-    tokenizer.set_num_node_and_edge_types(num_node_types=5, num_edge_types=4)
-    tokens = tokenizer.tokenize(data)
-    reconstructed_graph = tokenizer.decode(tokens)
-"""
-
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-
-
-@dataclass
-class SimpleGraphData:
-    """Minimal graph container used by this standalone module."""
-
-    edge_index: torch.Tensor
-    num_nodes: int
-    x: Optional[torch.Tensor] = None
-    edge_attr: Optional[torch.Tensor] = None
-    dataset_name: Optional[str] = None
 
 
 def _ensure_rng(rng):
@@ -90,7 +44,7 @@ def _build_out_neighbors(
     return neighbors, edge_ids
 
 
-def _sample_sent_from_graph(
+def sample_sent_from_graph(
     edge_index,
     num_nodes: int,
     max_length: int = -1,
@@ -155,7 +109,7 @@ def _sample_sent_from_graph(
     return np.asarray(sent_seq, dtype=np.int64), node_index_map
 
 
-def _sample_labeled_sent_from_graph(
+def sample_labeled_sent_from_graph(
     edge_index,
     node_labels,
     edge_labels,
@@ -241,7 +195,7 @@ def _sample_labeled_sent_from_graph(
     return np.asarray(sent_seq, dtype=np.int64), node_index_map
 
 
-def _reconstruct_graph_from_sent(
+def reconstruct_graph_from_sent(
     sent_seq: np.ndarray,
     reset: int,
     ladj: int,
@@ -274,7 +228,7 @@ def _reconstruct_graph_from_sent(
     return np.asarray(edges, dtype=np.int64).T
 
 
-def _reconstruct_graph_from_labeled_sent(
+def reconstruct_graph_from_labeled_sent(
     sent_seq: np.ndarray,
     reset: int,
     ladj: int,
@@ -361,7 +315,7 @@ def _reconstruct_graph_from_labeled_sent(
     return edge_index_np, node_labels_np, edge_labels_np
 
 
-def _remove_self_loops(edge_index: torch.Tensor, edge_attr: Optional[torch.Tensor] = None):
+def remove_self_loops(edge_index: torch.Tensor, edge_attr: Optional[torch.Tensor] = None):
     if edge_index.numel() == 0:
         return edge_index, edge_attr
     keep = edge_index[0] != edge_index[1]
@@ -371,9 +325,7 @@ def _remove_self_loops(edge_index: torch.Tensor, edge_attr: Optional[torch.Tenso
     return edge_index, edge_attr
 
 
-def _relabel_and_coalesce(
-    edge_index: torch.Tensor, edge_attr: Optional[torch.Tensor] = None
-):
+def relabel_and_coalesce(edge_index: torch.Tensor, edge_attr: Optional[torch.Tensor] = None):
     if edge_index.numel() == 0:
         empty_e = torch.zeros((2, 0), dtype=torch.long)
         if edge_attr is None:
@@ -399,21 +351,21 @@ def _relabel_and_coalesce(
     return unique_pairs.t().contiguous(), reduced_attr
 
 
-def _get_graph_from_sent(walk_index, idx_offset, reset, ladj, radj, undirected=True):
+def get_graph_from_sent(walk_index, idx_offset, reset, ladj, radj, undirected=True):
     walk_np = _to_numpy_1d(walk_index)
-    edge_np = _reconstruct_graph_from_sent(walk_np, reset, ladj, radj)
+    edge_np = reconstruct_graph_from_sent(walk_np, reset, ladj, radj)
     edge_index = torch.from_numpy(edge_np).long()
 
     if undirected and edge_index.numel() > 0:
         edge_sym = torch.stack((edge_index[1], edge_index[0]), dim=0)
         edge_index = torch.cat((edge_index, edge_sym), dim=1)
 
-    edge_index, _ = _remove_self_loops(edge_index, None)
-    edge_index, _ = _relabel_and_coalesce(edge_index, None)
+    edge_index, _ = remove_self_loops(edge_index, None)
+    edge_index, _ = relabel_and_coalesce(edge_index, None)
     return edge_index
 
 
-def _get_graph_from_labeled_sent(
+def get_graph_from_labeled_sent(
     walk_index,
     idx_offset,
     node_idx_offset,
@@ -426,7 +378,7 @@ def _get_graph_from_labeled_sent(
     undirected=True,
 ):
     walk_np = _to_numpy_1d(walk_index)
-    edge_np, node_labels_np, edge_labels_np = _reconstruct_graph_from_labeled_sent(
+    edge_np, node_labels_np, edge_labels_np = reconstruct_graph_from_labeled_sent(
         walk_np, reset, ladj, radj, idx_offset
     )
 
@@ -452,218 +404,6 @@ def _get_graph_from_labeled_sent(
         edge_index = torch.cat((edge_index, edge_sym), dim=1)
         edge_labels = torch.cat((edge_labels, edge_labels), dim=0)
 
-    edge_index, edge_labels = _remove_self_loops(edge_index, edge_labels)
-    edge_index, edge_labels = _relabel_and_coalesce(edge_index, edge_labels)
+    edge_index, edge_labels = remove_self_loops(edge_index, edge_labels)
+    edge_index, edge_labels = relabel_and_coalesce(edge_index, edge_labels)
     return edge_index, node_labels, edge_labels
-
-
-class GraphSequenceTokenizer:
-    """Tokenize graphs into AutoGraph SENT token sequences and decode back."""
-
-    sos: int = 0
-    reset: int = 1
-    ladj: int = 2
-    radj: int = 3
-    eos: int = 4
-    pad: int = 5
-    special_toks = ["sos", "reset", "ladj", "radj", "eos", "pad"]
-
-    def __init__(
-        self,
-        dataset_names=None,
-        max_length=-1,
-        truncation_length=None,
-        labeled_graph=False,
-        undirected=True,
-        append_eos=True,
-        rng=None,
-    ):
-        self.dataset_names = dataset_names or []
-        self.max_length = max_length
-        self.truncation_length = truncation_length
-        self.labeled_graph = labeled_graph
-        self.undirected = undirected
-        self.append_eos = append_eos
-        self.rng = rng
-
-        self.dataset_to_idx = {
-            dataset_name: i + len(self.special_toks)
-            for i, dataset_name in enumerate(self.dataset_names)
-        }
-        self.idx_offset = len(self.special_toks) + len(self.dataset_names)
-
-        self.max_num_nodes = None
-        self.num_node_types = 0
-        self.num_edge_types = 0
-        self.node_idx_offset = None
-        self.edge_idx_offset = None
-
-    def set_num_nodes(self, max_num_nodes):
-        if (self.max_num_nodes is None) or (self.max_num_nodes < max_num_nodes):
-            self.max_num_nodes = max_num_nodes
-
-    def set_num_node_and_edge_types(self, num_node_types=0, num_edge_types=0):
-        if self.labeled_graph:
-            if self.max_num_nodes is None:
-                raise ValueError("Call set_num_nodes before setting node/edge types.")
-            self.num_node_types = num_node_types
-            self.num_edge_types = num_edge_types
-            self.node_idx_offset = self.idx_offset + self.max_num_nodes
-            self.edge_idx_offset = self.node_idx_offset + self.num_node_types
-
-    def __len__(self):
-        if self.max_num_nodes is None:
-            raise ValueError("Call set_num_nodes before querying vocabulary length.")
-        if self.labeled_graph:
-            return (
-                self.idx_offset
-                + self.max_num_nodes
-                + self.num_node_types
-                + self.num_edge_types
-            )
-        return self.idx_offset + self.max_num_nodes
-
-    def _coalesce_if_available(self, data):
-        if hasattr(data, "is_coalesced") and callable(data.is_coalesced):
-            if not data.is_coalesced():
-                return data.coalesce()
-        return data
-
-    def tokenize(self, data):
-        data = self._coalesce_if_available(data)
-        if not hasattr(data, "edge_index"):
-            raise ValueError("data must provide edge_index.")
-
-        num_nodes = getattr(data, "num_nodes", None)
-        if num_nodes is None:
-            edge_index = _to_numpy_edge_index(data.edge_index)
-            num_nodes = int(edge_index.max()) + 1 if edge_index.shape[1] > 0 else 0
-
-        if self.labeled_graph:
-            if self.node_idx_offset is None or self.edge_idx_offset is None:
-                raise ValueError(
-                    "For labeled graphs, call set_num_nodes and "
-                    "set_num_node_and_edge_types before tokenizing."
-                )
-            if not hasattr(data, "x") or data.x is None:
-                raise ValueError("Labeled graph tokenization requires data.x (node labels).")
-            if not hasattr(data, "edge_attr") or data.edge_attr is None:
-                raise ValueError(
-                    "Labeled graph tokenization requires data.edge_attr (edge labels)."
-                )
-            walk_index, _ = _sample_labeled_sent_from_graph(
-                edge_index=data.edge_index,
-                node_labels=data.x,
-                edge_labels=data.edge_attr,
-                node_idx_offset=self.node_idx_offset,
-                edge_idx_offset=self.edge_idx_offset,
-                num_nodes=int(num_nodes),
-                max_length=self.max_length,
-                idx_offset=self.idx_offset,
-                reset=self.reset,
-                ladj=self.ladj,
-                radj=self.radj,
-                rng=self.rng,
-            )
-        else:
-            walk_index, _ = _sample_sent_from_graph(
-                edge_index=data.edge_index,
-                num_nodes=int(num_nodes),
-                max_length=self.max_length,
-                idx_offset=self.idx_offset,
-                reset=self.reset,
-                ladj=self.ladj,
-                radj=self.radj,
-                rng=self.rng,
-            )
-
-        start_offset = 1  # sos
-        end_offset = 1 if self.append_eos else 0
-
-        dataset_name_idx = None
-        if self.dataset_names and hasattr(data, "dataset_name"):
-            dataset_name_idx = self.dataset_to_idx.get(data.dataset_name, None)
-            if dataset_name_idx is not None:
-                start_offset += 1
-
-        walk_index_t = torch.from_numpy(walk_index)
-        tokens = torch.zeros(
-            (walk_index_t.shape[0] + start_offset + end_offset,), dtype=walk_index_t.dtype
-        )
-        tokens[0] = self.sos
-        if dataset_name_idx is not None:
-            tokens[1] = dataset_name_idx
-
-        if self.append_eos:
-            tokens[-1] = self.eos
-            tokens[start_offset:-1] = walk_index_t
-        else:
-            tokens[start_offset:] = walk_index_t
-
-        return tokens
-
-    def decode(self, tokens: torch.Tensor):
-        tokens = tokens[(tokens != self.pad) & (tokens != self.sos) & (tokens != self.eos)]
-        if tokens.numel() == 0:
-            return SimpleGraphData(edge_index=torch.zeros((2, 0), dtype=torch.long), num_nodes=0)
-
-        dataset_name = None
-        if self.dataset_names:
-            maybe_dataset_idx = int(tokens[0].item()) - len(self.special_toks)
-            if 0 <= maybe_dataset_idx < len(self.dataset_names):
-                dataset_name = self.dataset_names[maybe_dataset_idx]
-                tokens = tokens[1:]
-                if tokens.numel() == 0:
-                    return SimpleGraphData(
-                        edge_index=torch.zeros((2, 0), dtype=torch.long),
-                        num_nodes=0,
-                        dataset_name=dataset_name,
-                    )
-
-        if self.labeled_graph:
-            edge_index, node_labels, edge_labels = _get_graph_from_labeled_sent(
-                walk_index=tokens,
-                idx_offset=self.idx_offset,
-                node_idx_offset=self.node_idx_offset,
-                edge_idx_offset=self.edge_idx_offset,
-                num_node_types=self.num_node_types,
-                num_edge_types=self.num_edge_types,
-                reset=self.reset,
-                ladj=self.ladj,
-                radj=self.radj,
-                undirected=self.undirected,
-            )
-            num_nodes = (
-                int(edge_index.max().item()) + 1 if edge_index.numel() > 0 else int(node_labels.numel())
-            )
-            return SimpleGraphData(
-                x=node_labels,
-                edge_index=edge_index,
-                edge_attr=edge_labels,
-                num_nodes=num_nodes,
-                dataset_name=dataset_name,
-            )
-
-        edge_index = _get_graph_from_sent(
-            walk_index=tokens,
-            idx_offset=self.idx_offset,
-            reset=self.reset,
-            ladj=self.ladj,
-            radj=self.radj,
-            undirected=self.undirected,
-        )
-        num_nodes = int(edge_index.max().item()) + 1 if edge_index.numel() > 0 else 0
-        return SimpleGraphData(edge_index=edge_index, dataset_name=dataset_name, num_nodes=num_nodes)
-
-
-def graph_to_tokens(edge_index, num_nodes, tokenizer: GraphSequenceTokenizer, **attrs):
-    """Tokenize from raw graph tensors.
-
-    Args:
-        edge_index: Torch tensor with shape [2, num_edges].
-        num_nodes: Number of nodes.
-        tokenizer: Configured GraphSequenceTokenizer.
-        **attrs: Extra graph fields (e.g. dataset_name, x, edge_attr).
-    """
-    data = SimpleGraphData(edge_index=edge_index, num_nodes=num_nodes, **attrs)
-    return tokenizer.tokenize(data)
