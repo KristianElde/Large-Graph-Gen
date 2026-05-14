@@ -7,12 +7,4 @@ dependencies:
   - pip
   - pytorch>=2.2
   - torchvision
-  - numpy
-  - pillow
-  - transformers>=4.51
-  - accelerate>=0.30
-  - safetensors
-  - sentencepiece
-  - protobuf
-  - pip:
-      - huggingface-hub>=0.23
+  - libstdcxx-ng>=13

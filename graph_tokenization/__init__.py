@@ -30,12 +30,16 @@ Quick start (labeled graphs):
 """
 
 from .autograph import AutoGraphTokenizer
-from .base import GraphTokenizer, graph_to_tokens
+from .base import GraphTokenizer, TokenizerFactory, graph_to_tokens
 from .types import SimpleGraphData
 from .networkx_utils import simpleGraph_to_networkx
+from .tokenizers import NautyTokenizer, KandinskyTokenizer
 
 __all__ = [
     "AutoGraphTokenizer",
+    "NautyTokenizer",
+    "KandinskyTokenizer",
+    "TokenizerFactory",
     "GraphTokenizer",
     "SimpleGraphData",
     "graph_to_tokens",
