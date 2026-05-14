@@ -1,42 +1,47 @@
 #!/bin/bash
-#SBATCH --job-name=comm20_hyp_vqvae_install
+#SBATCH --job-name=install_env
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=32:00:00
-#SBATCH --output=outputs/comm20_vqvae_install_%A.out
-#SBATCH --error=outputs/comm20_vqvae_install_%A.err
+#SBATCH --output=outputs/install_env_%A.out
+#SBATCH --error=outputs/install_env_%A.err
 
 # 1. Environment
 module purge
 module load 2024
+module load GCC/13.3.0
 module load Miniconda3/24.7.1-0
 module load Mamba/24.9.0-0
 
-# 2. Create or update conda environment
-mamba env remove -n large-graph-gen --yes
+# 2. Recreate the environment from scratch
+echo "Removing any existing environment..."
+mamba env remove -n large-graph-gen --yes || true
 
-echo "Creating conda environment from environment.yaml..."
-mamba env create -f environment.yaml --yes
+echo "Creating a clean base environment..."
+mamba create -n large-graph-gen --yes -c pytorch -c conda-forge python=3.11 pip pytorch torchvision "libstdcxx-ng>=13"
 
 # 3. Activate environment
 echo "Activating environment..."
-source activate large-graph-gen
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate large-graph-gen
 
-# 4. Ensure clean environment (isolate from system modules)
+# 4. Ensure clean environment (isolate from system packages)
 unset PYTHONPATH
-unset LD_LIBRARY_PATH
+export PYTHONNOUSERSITE=1
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
-# 5. Verify installation
+# 5. Install Python packages with pip
+echo "Installing Python dependencies with pip..."
+python -m pip install --upgrade pip
+python -m pip install --no-cache-dir -r requirements.txt
+
+# 6. Verify installation
 echo "Verifying installation..."
 python --version
-pip list
-torch_python="import torch; import pandas; print(f'PyTorch version: {torch.__version__}'); print(f'Pandas version: {pandas.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
-python -c "$torch_python"
-
-# 6. Test torch-geometric import (main issue point)
-echo "Testing torch-geometric import..."
+python -m pip check
+python -c "import torch, pandas, safetensors, sklearn, transformers; print(f'PyTorch version: {torch.__version__}'); print(f'Pandas version: {pandas.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'Transformers version: {transformers.__version__}')"
 python -c "from torch_geometric.datasets import TUDataset; print('torch-geometric import successful!')"
 
 # 7. Installation complete

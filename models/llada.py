@@ -116,7 +116,7 @@ class LLaDAModel:
         # ------------------------------------------------------------------ #
         load_kwargs: dict = dict(
             trust_remote_code=True,
-            dtype=torch_dtype,
+            torch_dtype=torch_dtype,
         )
         if device == "auto":
             load_kwargs["device_map"] = "auto"
