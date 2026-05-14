@@ -45,16 +45,6 @@ def forward_process(
 
 class LLaDAModel:
     """
-    High-level wrapper around a HuggingFace LLaDA checkpoint.
-
-    Responsibilities
-    ----------------
-    1. Load the tokenizer + model from a HF hub path (or local dir).
-    2. Optionally register extra special tokens that your SFT data needs.
-    3. Expose  ``generate()``  — iterative masked-diffusion decoding that
-       returns a plain Python string.
-    4. Expose  ``prepare_for_lora()``  — wraps the model with PEFT LoRA
-       adapters so you can plug it straight into a training loop.
 
     Parameters
     ----------
@@ -116,9 +106,6 @@ class LLaDAModel:
             **load_kwargs,
         )
 
-        # ------------------------------------------------------------------ #
-        # Step 4 — Resize embeddings if extra tokens were added               #
-        # ------------------------------------------------------------------ #
         if extra_special_tokens:
             self.model.resize_token_embeddings(len(self.tokenizer))
             print(f"[LLaDA] Embedding matrix resized to "
@@ -129,18 +116,9 @@ class LLaDAModel:
             self.model = self.model.to(device)
 
         self.model.eval()
-
-        # ------------------------------------------------------------------ #
-        # Step 5 — Store the [MASK] token id                                  #
-        # ------------------------------------------------------------------ #
-        # The authors hard-code 126336 in all their code.  We do the same but
-        # fall back to whatever the tokenizer reports just in case a fine-tuned
-        # checkpoint changes this.
         self.mask_token_id = MASK_TOKEN_ID
 
-    # ---------------------------------------------------------------------- #
-    # Public API — generate                                                   #
-    # ---------------------------------------------------------------------- #
+
     @torch.inference_mode()
     def generate(
         self,
@@ -301,9 +279,6 @@ class LLaDAModel:
 
         return self.tokenizer.decode(answer_token_ids, skip_special_tokens=True)
 
-    # ---------------------------------------------------------------------- #
-    # Public API — prepare_for_lora                                           #
-    # ---------------------------------------------------------------------- #
     def prepare_for_lora(
         self,
         r: int = 16,
@@ -375,9 +350,6 @@ class LLaDAModel:
         # ------------------------------------------------------------------ #
         self.model.print_trainable_parameters()
 
-    # ---------------------------------------------------------------------- #
-    # SFT loss helper (call this inside your training loop)                   #
-    # ---------------------------------------------------------------------- #
     def compute_sft_loss(
         self,
         input_ids: torch.Tensor,
@@ -415,14 +387,11 @@ class LLaDAModel:
         # Overwrite the prompt region in the noisy batch with the clean ids
         noisy_batch[prompt_mask] = input_ids[prompt_mask]
 
-        # ---- Compute answer lengths (for loss normalisation) -------------- #
         answer_lengths = (1 - prompt_mask.long()).sum(dim=1, keepdim=True)  # (b, 1)
         answer_lengths = answer_lengths.expand(b, l)                         # (b, l)
 
-        # ---- Forward pass ------------------------------------------------- #
         logits = self.model(input_ids=noisy_batch).logits   # (b, l, V)
 
-        # ---- Masked cross-entropy loss ------------------------------------ #
         # Only compute loss on positions that were actually masked
         masked_indices = noisy_batch == self.mask_token_id  # (b, l)
 
