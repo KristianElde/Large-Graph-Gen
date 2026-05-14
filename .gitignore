@@ -36,3 +36,5 @@ htmlcov/
 Thumbs.db
 *.pt
 data/*
+*.out
+*.err
