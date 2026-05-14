@@ -8,18 +8,16 @@ from pathlib import Path
 import torch
 from torch.optim import AdamW
 
-from graph_tokenization import AutoGraphTokenizer
+# Change: Import the Factory and the Base class instead of just AutoGraph
+from graph_tokenization import TokenizerFactory, GraphTokenizer
 from models import LLaDAModel
 
-
 DEFAULT_PROMPT = "Generate graph text:\n"
-
 
 @dataclass
 class GraphTextSample:
     prompt: str
     answer: str
-
 
 class GraphTextDataset:
     def __init__(self, samples: list[GraphTextSample]) -> None:
@@ -31,126 +29,39 @@ class GraphTextDataset:
     def __getitem__(self, idx: int) -> GraphTextSample:
         return self.samples[idx]
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Fine-tune LLaDA on graph text built from a small PyG "
-            "dataset via AutoGraph tokenization."
-        )
+        description="Fine-tune LLaDA on graph text using swappable tokenizers."
     )
     parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
+        "--model", type=str, required=True,
         help="Hugging Face model id or local path for the LLaDA checkpoint.",
     )
+    # Adjusted: Choices now reflect your new swappable options
     parser.add_argument(
         "--graph-tokenizer-type",
         type=str,
         default="autograph",
-        choices=["autograph"],
-        help="Graph tokenizer type. Currently supported: autograph.",
+        choices=["autograph", "nauty", "kandinsky"],
+        help="Graph tokenizer type. Supported: autograph, nauty, kandinsky.",
     )
-    parser.add_argument(
-        "--pyg-dataset",
-        type=str,
-        default="MUTAG",
-        help="Small PyG dataset from torch_geometric.datasets.TUDataset.",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=str,
-        default="./data/pyg",
-        help="Where PyG datasets are downloaded and cached.",
-    )
-    parser.add_argument(
-        "--max-graphs",
-        type=int,
-        default=64,
-        help="Use at most this many graphs for quick experimentation.",
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=1,
-        help="Number of fine-tuning epochs.",
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=5e-5,
-        help="Learning rate for AdamW.",
-    )
-    parser.add_argument(
-        "--weight-decay",
-        type=float,
-        default=0.01,
-        help="Weight decay for AdamW.",
-    )
-    parser.add_argument(
-        "--max-length",
-        type=int,
-        default=512,
-        help="Maximum model sequence length after text tokenization.",
-    )
-    parser.add_argument(
-        "--train-device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        choices=["cpu", "cuda"],
-        help="Device used for training.",
-    )
-    parser.add_argument(
-        "--torch-dtype",
-        type=str,
-        default="bfloat16",
-        choices=["float32", "bfloat16", "float16"],
-        help="Torch dtype used to load model weights.",
-    )
-    parser.add_argument(
-        "--use-lora",
-        action="store_true",
-        help="Enable LoRA adapters for parameter-efficient tuning.",
-    )
-    parser.add_argument(
-        "--lora-r",
-        type=int,
-        default=16,
-        help="LoRA rank.",
-    )
-    parser.add_argument(
-        "--lora-alpha",
-        type=int,
-        default=32,
-        help="LoRA alpha.",
-    )
-    parser.add_argument(
-        "--lora-dropout",
-        type=float,
-        default=0.05,
-        help="LoRA dropout.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="./checkpoints/finetune-llada-graphs",
-        help="Directory where model/tokenizer artifacts are saved.",
-    )
-    parser.add_argument(
-        "--prompt",
-        type=str,
-        default=DEFAULT_PROMPT,
-        help="Prompt prefix used to condition graph text generation.",
-    )
+    parser.add_argument("--pyg-dataset", type=str, default="MUTAG")
+    parser.add_argument("--data-root", type=str, default="./data/pyg")
+    parser.add_argument("--max-graphs", type=int, default=64)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--max-length", type=int, default=512)
+    parser.add_argument("--train-device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--torch-dtype", type=str, default="bfloat16", choices=["float32", "bfloat16", "float16"])
+    parser.add_argument("--use-lora", action="store_true")
+    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--lora-dropout", type=float, default=0.05)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output-dir", type=str, default="./checkpoints/finetune-llada-graphs")
+    parser.add_argument("--prompt", type=str, default=DEFAULT_PROMPT)
     return parser.parse_args()
-
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -170,8 +81,9 @@ def map_dtype(dtype_name: str) -> torch.dtype:
 
 def graph_tokens_to_text(
     tokens: torch.Tensor,
-    tokenizer: AutoGraphTokenizer,
+    tokenizer: GraphTokenizer, # Use Base class type
 ) -> str:
+    # Note: All your tokenizers share these IDs because they inherit from AutoGraph
     special = {
         tokenizer.sos: "<sos>",
         tokenizer.reset: "<reset>",
@@ -186,6 +98,7 @@ def graph_tokens_to_text(
         if token in special:
             parts.append(special[token])
         else:
+            # Shared logic for node re-indexing
             node_id = token - tokenizer.idx_offset
             parts.append(f"n{node_id}")
     return " ".join(parts)
@@ -206,15 +119,16 @@ def load_small_pyg_dataset(dataset_name: str, root: str):
     return dataset
 
 
-def build_graph_tokenizer(tokenizer_type: str, dataset) -> AutoGraphTokenizer:
-    if tokenizer_type != "autograph":
-        raise ValueError(f"Unsupported graph tokenizer type: {tokenizer_type}")
-
-    tokenizer = AutoGraphTokenizer(
+def build_graph_tokenizer(tokenizer_type: str, dataset) -> GraphTokenizer:
+    # Adjusted: Use the Factory to get the requested tokenizer
+    tokenizer = TokenizerFactory.get_tokenizer(
+        tokenizer_type,
         dataset_names=[dataset.name],
         undirected=True,
         append_eos=True,
     )
+    
+    # Standard setup for vocab size
     max_num_nodes = max(int(graph.num_nodes) for graph in dataset)
     tokenizer.set_num_nodes(max_num_nodes)
     return tokenizer
@@ -222,7 +136,7 @@ def build_graph_tokenizer(tokenizer_type: str, dataset) -> AutoGraphTokenizer:
 
 def build_graph_text_samples(
     dataset,
-    graph_tokenizer: AutoGraphTokenizer,
+    graph_tokenizer: GraphTokenizer,
     prompt_prefix: str,
     max_graphs: int,
 ) -> GraphTextDataset:
@@ -231,16 +145,16 @@ def build_graph_text_samples(
 
     for i in range(num_graphs):
         graph = dataset[i]
-        graph.dataset_name = dataset.name
+        # Important: set dataset name for the tokenizer's internal mapping
+        graph.dataset_name = dataset.name 
+        
+        # This call now uses nauty/kandinsky logic if selected
         token_ids = graph_tokenizer.tokenize(graph)
+        
         graph_text = graph_tokens_to_text(token_ids, graph_tokenizer)
         samples.append(
             GraphTextSample(prompt=prompt_prefix, answer=graph_text)
         )
-
-    if not samples:
-        raise ValueError("No graph samples were created.")
-
     return GraphTextDataset(samples)
 
 

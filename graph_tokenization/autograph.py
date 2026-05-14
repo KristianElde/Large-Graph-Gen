@@ -9,10 +9,10 @@ from .autograph_ops import (
     sample_labeled_sent_from_graph,
     sample_sent_from_graph,
 )
-from .base import GraphTokenizer
+from .base import GraphTokenizer, TokenizerFactory
 from .types import SimpleGraphData
 
-
+@TokenizerFactory.register('autograph')
 class AutoGraphTokenizer(GraphTokenizer):
     """Tokenize graphs into AutoGraph SENT token sequences and decode back."""
 
