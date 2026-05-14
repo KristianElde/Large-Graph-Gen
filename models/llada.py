@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForMaskedLM
@@ -11,6 +13,7 @@ MASK_TOKEN_ID: int = 126336   # Reserved [MASK] id used by LLaDA
 def forward_process(
     input_ids: torch.Tensor,
     eps: float = 1e-3,
+    mask_token_id: int = MASK_TOKEN_ID,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Adds random masking noise to a batch of token sequences.
@@ -38,7 +41,7 @@ def forward_process(
     masked_indices = torch.rand((b, l), device=input_ids.device) < p_mask
 
     # Replace masked positions with the special [MASK] token
-    noisy_batch = torch.where(masked_indices, MASK_TOKEN_ID, input_ids)
+    noisy_batch = torch.where(masked_indices, mask_token_id, input_ids)
 
     return noisy_batch, masked_indices, p_mask
 
@@ -51,10 +54,17 @@ class LLaDAModel:
     hf_model_path : str
         HuggingFace hub repo-id or local directory containing the checkpoint.
         e.g. ``"GSAI-ML/LLaDA-8B-Instruct"``
+    tokenizer : Any | None
+        Tokenizer object for input/output conversion. If omitted, the Hugging Face
+        tokenizer from ``hf_model_path`` is used. Custom tokenizers should expose
+        ``tokenize(...)`` and ``decode(...)`` to match the shared graph API.
     extra_special_tokens : list[str] | None
         Additional tokens to add to the vocabulary before loading.
         Useful when your SFT data uses domain-specific control tokens.
         The embedding matrix is resized automatically.
+    mask_token_id : int | None
+        Mask token id used by diffusion corruption. If omitted, the model tries
+        to infer it from the tokenizer and falls back to ``MASK_TOKEN_ID``.
     device : str
         ``"cuda"``, ``"cpu"``, or ``"auto"`` (uses accelerate device mapping).
     torch_dtype : torch.dtype
@@ -65,7 +75,9 @@ class LLaDAModel:
     def __init__(
         self,
         hf_model_path: str,
+        tokenizer: Any | None = None,
         extra_special_tokens: list[str] | None = None,
+        mask_token_id: int | None = None,
         device: str = "cuda",
         torch_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
@@ -76,14 +88,21 @@ class LLaDAModel:
         # ------------------------------------------------------------------ #
         # Step 1 — Load the tokenizer                                         #
         # ------------------------------------------------------------------ #
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            hf_model_path,
-            trust_remote_code=True,
-        )
+        if tokenizer is None:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                hf_model_path,
+                trust_remote_code=True,
+            )
+        else:
+            self.tokenizer = tokenizer
 
         # ------------------------------------------------------------------ #
         # Step 2 — Register extra special tokens (optional)                   #
         # ------------------------------------------------------------------ #
+        if extra_special_tokens and tokenizer is not None:
+            raise ValueError(
+                "extra_special_tokens is only supported when using the Hugging Face tokenizer."
+            )
         if extra_special_tokens:
             num_added = self.tokenizer.add_special_tokens(
                 {"additional_special_tokens": extra_special_tokens}
@@ -106,28 +125,50 @@ class LLaDAModel:
             **load_kwargs,
         )
 
+        tokenizer_vocab_size = self._get_tokenizer_vocab_size()
         if extra_special_tokens:
             self.model.resize_token_embeddings(len(self.tokenizer))
             print(f"[LLaDA] Embedding matrix resized to "
                   f"{len(self.tokenizer)} tokens.")
+        elif tokenizer_vocab_size is not None:
+            current_vocab_size = self.model.get_input_embeddings().num_embeddings
+            if tokenizer_vocab_size != current_vocab_size:
+                self.model.resize_token_embeddings(tokenizer_vocab_size)
+                print(
+                    f"[LLaDA] Embedding matrix resized to {tokenizer_vocab_size} tokens "
+                    f"to match the supplied tokenizer."
+                )
 
         # Move to device when not using device_map="auto"
         if device != "auto":
             self.model = self.model.to(device)
 
         self.model.eval()
-        self.mask_token_id = MASK_TOKEN_ID
+
+        inferred_mask_token_id = self._get_mask_token_id_from_tokenizer()
+        if mask_token_id is not None:
+            self.mask_token_id = int(mask_token_id)
+        elif inferred_mask_token_id is not None:
+            self.mask_token_id = inferred_mask_token_id
+        else:
+            self.mask_token_id = MASK_TOKEN_ID
+
+        if tokenizer_vocab_size is not None and self.mask_token_id >= tokenizer_vocab_size:
+            raise ValueError(
+                f"mask_token_id={self.mask_token_id} is out of tokenizer vocabulary range "
+                f"[0, {tokenizer_vocab_size - 1}]."
+            )
 
 
     @torch.inference_mode()
     def generate(
         self,
-        prompt: str,
+        prompt: Any,
         max_new_tokens: int = 128,
         num_steps: int = 10,
         temperature: float = 0.0,
         top_p: float = 1.0,
-    ) -> str:
+    ) -> Any:
         """
         Generate a response to ``prompt`` using iterative masked-diffusion
         decoding — the inference algorithm described in the LLaDA paper.
@@ -146,7 +187,8 @@ class LLaDAModel:
         3. Decode the committed answer tokens back to a string.
 
         Args:
-            prompt        : input string from the user
+            prompt        : input object consumed by ``tokenizer.tokenize``.
+                            With the default tokenizer this is a ``str``.
             max_new_tokens: maximum answer length in tokens
             num_steps     : number of denoising steps (more = better quality,
                             slower; 10–50 is a practical range)
@@ -154,22 +196,17 @@ class LLaDAModel:
             top_p         : nucleus sampling threshold (ignored when temp=0)
 
         Returns:
-            Decoded answer string (prompt stripped).
+            Decoded answer object from ``tokenizer.decode``.
         """
         device = next(self.model.parameters()).device
 
         # ------------------------------------------------------------------ #
         # 5a — Encode the prompt                                               #
         # ------------------------------------------------------------------ #
-        # We use ``add_special_tokens=True`` so BOS / chat template tokens
-        # are inserted automatically (the tokenizer handles this).
-        prompt_ids = self.tokenizer.encode(
-            prompt,
-            return_tensors="pt",
-            add_special_tokens=True,
-        ).to(device)                                        # (1, prompt_len)
+        prompt_ids = self._tokenize_prompt(prompt, device=device)  # (1, prompt_len)
 
         prompt_len = prompt_ids.shape[1]
+        eos_id = self._get_eos_token_id()
 
         # ------------------------------------------------------------------ #
         # 5b — Build the initial noisy answer (fully masked)                  #
@@ -255,7 +292,6 @@ class LLaDAModel:
             answer_mask[commit_positions] = False
 
             # Early-exit: if an EOS was committed, stop denoising
-            eos_id = self.tokenizer.eos_token_id
             if eos_id is not None:
                 committed_answer = input_ids[0, prompt_len:]
                 if (committed_answer == eos_id).any():
@@ -267,7 +303,6 @@ class LLaDAModel:
         answer_token_ids = input_ids[0, prompt_len:].tolist()
 
         # Truncate at EOS if present
-        eos_id = self.tokenizer.eos_token_id
         if eos_id is not None and eos_id in answer_token_ids:
             answer_token_ids = answer_token_ids[: answer_token_ids.index(eos_id)]
 
@@ -277,7 +312,7 @@ class LLaDAModel:
             t for t in answer_token_ids if t != self.mask_token_id
         ]
 
-        return self.tokenizer.decode(answer_token_ids, skip_special_tokens=True)
+        return self._decode_answer_tokens(answer_token_ids)
 
     def prepare_for_lora(
         self,
@@ -377,7 +412,11 @@ class LLaDAModel:
         b, l = input_ids.shape
 
         # ---- Apply the forward diffusion process to the full sequence ----- #
-        noisy_batch, _, p_mask = forward_process(input_ids, eps=eps)
+        noisy_batch, _, p_mask = forward_process(
+            input_ids,
+            eps=eps,
+            mask_token_id=self.mask_token_id,
+        )
 
         # ---- Restore the prompt (never add noise to it) ------------------- #
         # Build a boolean mask: True for prompt positions, False for answer
@@ -405,6 +444,69 @@ class LLaDAModel:
         loss = torch.sum(token_loss / answer_lengths[masked_indices]) / b
 
         return loss
+
+    def _tokenize_prompt(self, prompt: Any, device: torch.device) -> torch.Tensor:
+        if hasattr(self.tokenizer, "encode"):
+            tokenized = self.tokenizer.encode(
+                prompt,
+                return_tensors="pt",
+                add_special_tokens=True,
+            )
+        elif hasattr(self.tokenizer, "tokenize"):
+            tokenized = self.tokenizer.tokenize(prompt)
+        else:
+            raise ValueError(
+                "Tokenizer must provide either `tokenize(...)` or `encode(...)`."
+            )
+
+        if isinstance(tokenized, torch.Tensor):
+            prompt_ids = tokenized.long()
+        else:
+            prompt_ids = torch.as_tensor(tokenized, dtype=torch.long)
+
+        if prompt_ids.ndim == 1:
+            prompt_ids = prompt_ids.unsqueeze(0)
+        if prompt_ids.ndim != 2:
+            raise ValueError(
+                f"Expected tokenized prompt to have shape (seq_len,) or (1, seq_len), got {tuple(prompt_ids.shape)}."
+            )
+        return prompt_ids.to(device)
+
+    def _decode_answer_tokens(self, answer_token_ids: list[int]) -> Any:
+        decode_fn = getattr(self.tokenizer, "decode", None)
+        if decode_fn is None:
+            raise ValueError("Tokenizer must provide a `decode(...)` method.")
+
+        answer_tensor = torch.tensor(answer_token_ids, dtype=torch.long)
+        if hasattr(self.tokenizer, "eos_token_id"):
+            try:
+                return decode_fn(answer_token_ids, skip_special_tokens=True)
+            except TypeError:
+                return decode_fn(answer_token_ids)
+        return decode_fn(answer_tensor)
+
+    def _get_eos_token_id(self) -> int | None:
+        eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+        if eos_token_id is not None:
+            return int(eos_token_id)
+        eos_token_id = getattr(self.tokenizer, "eos", None)
+        if eos_token_id is not None:
+            return int(eos_token_id)
+        return None
+
+    def _get_mask_token_id_from_tokenizer(self) -> int | None:
+        mask_token_id = getattr(self.tokenizer, "mask_token_id", None)
+        if mask_token_id is not None:
+            return int(mask_token_id)
+        mask_token_id = getattr(self.tokenizer, "mask", None)
+        if mask_token_id is not None:
+            return int(mask_token_id)
+        return None
+
+    def _get_tokenizer_vocab_size(self) -> int | None:
+        if hasattr(self.tokenizer, "__len__"):
+            return int(len(self.tokenizer))
+        return None
 
 
 def _top_p_filter(probs: torch.Tensor, top_p: float) -> torch.Tensor:
