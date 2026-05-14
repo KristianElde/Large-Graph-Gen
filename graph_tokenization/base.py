@@ -28,3 +28,18 @@ class TokenizerFactory:
         if name.lower() not in cls._tokenizers:
             raise ValueError(f"Tokenizer {name} not found. Available: {list(cls._tokenizers.keys())}")
         return cls._tokenizers[name.lower()](**kwargs)
+
+
+def graph_to_tokens(edge_index, num_nodes, tokenizer: GraphTokenizer):
+    """Convert an unlabeled graph to tokens.
+    
+    Args:
+        edge_index: Tensor of shape [2, num_edges] with edge indices
+        num_nodes: Number of nodes in the graph
+        tokenizer: GraphTokenizer instance
+        
+    Returns:
+        Tokenized representation of the graph
+    """
+    data = SimpleGraphData(edge_index=edge_index, num_nodes=num_nodes)
+    return tokenizer.tokenize(data)

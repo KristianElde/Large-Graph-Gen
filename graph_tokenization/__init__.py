@@ -30,7 +30,7 @@ Quick start (labeled graphs):
 """
 
 from .autograph import AutoGraphTokenizer
-from .base import GraphTokenizer, graph_to_tokens
+from .base import GraphTokenizer, TokenizerFactory, graph_to_tokens
 from .types import SimpleGraphData
 from .tokenizers import NautyTokenizer, KandinskyTokenizer
 
