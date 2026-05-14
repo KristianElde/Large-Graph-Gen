@@ -4,11 +4,12 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForMaskedLM
+from transformers import AutoModel, AutoTokenizer
 from peft import LoraConfig, get_peft_model, TaskType
 
 
 MASK_TOKEN_ID: int = 126336   # Reserved [MASK] id used by LLaDA
+
 
 def forward_process(
     input_ids: torch.Tensor,
@@ -115,12 +116,12 @@ class LLaDAModel:
         # ------------------------------------------------------------------ #
         load_kwargs: dict = dict(
             trust_remote_code=True,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
         )
         if device == "auto":
             load_kwargs["device_map"] = "auto"
 
-        self.model = AutoModelForMaskedLM.from_pretrained(
+        self.model = AutoModel.from_pretrained(
             hf_model_path,
             **load_kwargs,
         )
@@ -158,7 +159,6 @@ class LLaDAModel:
                 f"mask_token_id={self.mask_token_id} is out of tokenizer vocabulary range "
                 f"[0, {tokenizer_vocab_size - 1}]."
             )
-
 
     @torch.inference_mode()
     def generate(
@@ -203,7 +203,8 @@ class LLaDAModel:
         # ------------------------------------------------------------------ #
         # 5a — Encode the prompt                                               #
         # ------------------------------------------------------------------ #
-        prompt_ids = self._tokenize_prompt(prompt, device=device)  # (1, prompt_len)
+        prompt_ids = self._tokenize_prompt(
+            prompt, device=device)  # (1, prompt_len)
 
         prompt_len = prompt_ids.shape[1]
         eos_id = self._get_eos_token_id()
@@ -227,7 +228,8 @@ class LLaDAModel:
 
         # Track which positions are still masked (only within the answer)
         # Shape: (max_new_tokens,)  boolean
-        answer_mask = torch.ones(max_new_tokens, dtype=torch.bool, device=device)
+        answer_mask = torch.ones(
+            max_new_tokens, dtype=torch.bool, device=device)
 
         # How many tokens do we commit per step?
         # We spread the un-masking evenly so that by step T all are committed.
@@ -243,12 +245,14 @@ class LLaDAModel:
             logits = outputs.logits                         # (1, seq_len, V)
 
             # Isolate logits for the answer portion only
-            answer_logits = logits[0, prompt_len:, :]      # (max_new_tokens, V)
+            # (max_new_tokens, V)
+            answer_logits = logits[0, prompt_len:, :]
 
             # ---- Sample / select tokens ----------------------------------- #
             if temperature == 0.0:
                 # Greedy: pick the argmax at every still-masked position
-                predicted_ids = answer_logits.argmax(dim=-1)   # (max_new_tokens,)
+                predicted_ids = answer_logits.argmax(
+                    dim=-1)   # (max_new_tokens,)
                 # Confidence = softmax probability of the predicted token
                 probs = F.softmax(answer_logits, dim=-1)
                 confidence = probs.gather(
@@ -260,7 +264,8 @@ class LLaDAModel:
                 probs = F.softmax(scaled_logits, dim=-1)
                 if top_p < 1.0:
                     probs = _top_p_filter(probs, top_p)
-                predicted_ids = torch.multinomial(probs, num_samples=1).squeeze(-1)
+                predicted_ids = torch.multinomial(
+                    probs, num_samples=1).squeeze(-1)
                 confidence = probs.gather(
                     1, predicted_ids.unsqueeze(-1)
                 ).squeeze(-1)
@@ -304,7 +309,8 @@ class LLaDAModel:
 
         # Truncate at EOS if present
         if eos_id is not None and eos_id in answer_token_ids:
-            answer_token_ids = answer_token_ids[: answer_token_ids.index(eos_id)]
+            answer_token_ids = answer_token_ids[: answer_token_ids.index(
+                eos_id)]
 
         # Remove any residual [MASK] tokens (shouldn't happen after full
         # denoising, but is a safe guard)
@@ -426,8 +432,10 @@ class LLaDAModel:
         # Overwrite the prompt region in the noisy batch with the clean ids
         noisy_batch[prompt_mask] = input_ids[prompt_mask]
 
-        answer_lengths = (1 - prompt_mask.long()).sum(dim=1, keepdim=True)  # (b, 1)
-        answer_lengths = answer_lengths.expand(b, l)                         # (b, l)
+        answer_lengths = (1 - prompt_mask.long()).sum(dim=1,
+                                                      keepdim=True)  # (b, 1)
+        answer_lengths = answer_lengths.expand(
+            b, l)                         # (b, l)
 
         logits = self.model(input_ids=noisy_batch).logits   # (b, l, V)
 
@@ -527,7 +535,8 @@ def _top_p_filter(probs: torch.Tensor, top_p: float) -> torch.Tensor:
     sorted_probs[cumulative - sorted_probs > top_p] = 0.0
 
     # Scatter back to original ordering and renormalise
-    filtered = torch.zeros_like(probs).scatter_(-1, sorted_indices, sorted_probs)
+    filtered = torch.zeros_like(
+        probs).scatter_(-1, sorted_indices, sorted_probs)
     filtered = filtered / filtered.sum(dim=-1, keepdim=True).clamp(min=1e-8)
     return filtered
 
