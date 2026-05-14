@@ -32,10 +32,12 @@ Quick start (labeled graphs):
 from .autograph import AutoGraphTokenizer
 from .base import GraphTokenizer, graph_to_tokens
 from .types import SimpleGraphData
+from .networkx_utils import simpleGraph_to_networkx
 
 __all__ = [
     "AutoGraphTokenizer",
     "GraphTokenizer",
     "SimpleGraphData",
     "graph_to_tokens",
+    "simpleGraph_to_networkx",
 ]
