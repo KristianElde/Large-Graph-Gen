@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -197,49 +198,71 @@ def build_training_sequence(
 
 
 def run_finetuning(args: argparse.Namespace) -> None:
+    print(f"[LOG] run_finetuning starting", flush=True)
     set_seed(args.seed)
+    print(f"[LOG] Seed set to {args.seed}", flush=True)
 
+    print(f"[LOG] Loading PyG dataset: {args.pyg_dataset}", flush=True)
     dataset = load_small_pyg_dataset(args.pyg_dataset, args.data_root)
+    print(f"[LOG] Dataset loaded with {len(dataset)} graphs", flush=True)
+    
+    print(f"[LOG] Building graph tokenizer: {args.graph_tokenizer_type}", flush=True)
     graph_tokenizer = build_graph_tokenizer(args.graph_tokenizer_type, dataset)
+    print(f"[LOG] Graph tokenizer built", flush=True)
+    
+    print(f"[LOG] Building graph text samples (max_graphs={args.max_graphs})", flush=True)
     graph_text_dataset = build_graph_text_samples(
         dataset=dataset,
         graph_tokenizer=graph_tokenizer,
         prompt_prefix=args.prompt,
         max_graphs=args.max_graphs,
     )
+    print(f"[LOG] Graph text dataset created with {len(graph_text_dataset)} samples", flush=True)
 
+    print(f"[LOG] Creating LLaDAModel from {args.model}", flush=True)
     llada = LLaDAModel(
         hf_model_path=args.model,
         tokenizer=None,
         device=args.train_device,
         torch_dtype=map_dtype(args.torch_dtype),
     )
+    print(f"[LOG] LLaDAModel created successfully", flush=True)
 
     if args.use_lora:
+        print(f"[LOG] Preparing LoRA", flush=True)
         llada.prepare_for_lora(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
         )
+        print(f"[LOG] LoRA preparation complete", flush=True)
 
+    print(f"[LOG] Switching model to train mode", flush=True)
     llada.model.train()
+    print(f"[LOG] Model in train mode", flush=True)
 
+    print(f"[LOG] Creating optimizer", flush=True)
     optimizer = AdamW(
         llada.model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
+    print(f"[LOG] Optimizer created", flush=True)
 
     total_steps = args.epochs * len(graph_text_dataset)
+    print(f"[LOG] Starting training: {total_steps} total steps", flush=True)
     global_step = 0
 
     for epoch in range(args.epochs):
+        print(f"[LOG] Epoch {epoch + 1}/{args.epochs} starting", flush=True)
         indices = list(range(len(graph_text_dataset)))
         random.shuffle(indices)
         running_loss = 0.0
 
         for idx in indices:
             sample = graph_text_dataset[idx]
+            if global_step % 10 == 0:
+                print(f"[LOG] Step {global_step}: Processing sample {idx}", flush=True)
             input_ids, prompt_lengths = build_training_sequence(
                 tokenizer=llada.tokenizer,
                 sample=sample,
@@ -269,8 +292,10 @@ def run_finetuning(args: argparse.Namespace) -> None:
                 )
 
         epoch_loss = running_loss / len(graph_text_dataset)
+        print(f"[LOG] Epoch {epoch + 1} complete: avg_loss={epoch_loss:.4f}", flush=True)
         print(f"[epoch {epoch + 1}/{args.epochs}] avg_loss={epoch_loss:.4f}")
 
+    print(f"[LOG] Training complete. Saving model...", flush=True)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     llada.model.save_pretrained(output_dir)
