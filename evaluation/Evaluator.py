@@ -33,11 +33,48 @@ class Evaluator:
         valid_graphs = len(graphs)
 
         validity = valid_graphs / total_graphs
+        graph_stats = self.graph_stats(graphs)
         uniqueness, novelty = self.eval_fraction_unique_non_isomorphic(
             graphs, train_data, total_gen_graphs=total_graphs
         )
 
-        return {"validity": validity, "uniqueness": uniqueness, "novelty": novelty}
+        return {
+            "validity": validity,
+            "uniqueness": uniqueness,
+            "novelty": novelty,
+            **graph_stats,
+        }
+
+    def graph_stats(self, graphs: Sequence[SimpleGraphData]) -> dict[str, float | int]:
+        if len(graphs) == 0:
+            return {
+                "max_degree": 0,
+                "min_degree": 0,
+                "avg_degree": 0.0,
+                "total_nodes": 0,
+                "total_edges": 0,
+            }
+
+        nx_graphs = [simpleGraph_to_networkx(g) for g in graphs]
+        degrees = [
+            degree
+            for graph in nx_graphs
+            for _, degree in graph.degree()
+        ]
+        total_nodes = sum(graph.number_of_nodes() for graph in nx_graphs)
+        total_edges = sum(graph.number_of_edges() for graph in nx_graphs)
+
+        max_degree = max(degrees) if degrees else 0
+        min_degree = min(degrees) if degrees else 0
+        avg_degree = (sum(degrees) / len(degrees)) if degrees else 0.0
+
+        return {
+            "max_degree": max_degree,
+            "min_degree": min_degree,
+            "avg_degree": avg_degree,
+            "total_nodes": total_nodes,
+            "total_edges": total_edges,
+        }
 
     def eval_fraction_unique_non_isomorphic(
         self,
