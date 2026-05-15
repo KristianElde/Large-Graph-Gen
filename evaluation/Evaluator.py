@@ -46,27 +46,39 @@ class Evaluator:
         }
 
     def graph_stats(self, graphs: Sequence[SimpleGraphData]) -> dict[str, float | int]:
-        if len(graphs) == 0:
+        total_graphs = len(graphs)
+
+        if total_graphs == 0:
             return {
-                "max_degree": 0,
-                "min_degree": 0,
+                "max_degree": 0.0,
+                "min_degree": 0.0,
                 "avg_degree": 0.0,
                 "total_nodes": 0,
                 "total_edges": 0,
             }
 
         nx_graphs = [simpleGraph_to_networkx(g) for g in graphs]
-        degrees = [
-            degree
-            for graph in nx_graphs
-            for _, degree in graph.degree()
-        ]
+        graph_max_degrees = []
+        graph_min_degrees = []
+        graph_avg_degrees = []
+
+        for graph in nx_graphs:
+            degrees = [degree for _, degree in graph.degree()]
+            if degrees:
+                graph_max_degrees.append(max(degrees))
+                graph_min_degrees.append(min(degrees))
+                graph_avg_degrees.append(sum(degrees) / len(degrees))
+            else:
+                graph_max_degrees.append(0)
+                graph_min_degrees.append(0)
+                graph_avg_degrees.append(0.0)
+
         total_nodes = sum(graph.number_of_nodes() for graph in nx_graphs)
         total_edges = sum(graph.number_of_edges() for graph in nx_graphs)
 
-        max_degree = max(degrees) if degrees else 0
-        min_degree = min(degrees) if degrees else 0
-        avg_degree = (sum(degrees) / len(degrees)) if degrees else 0.0
+        max_degree = sum(graph_max_degrees) / total_graphs
+        min_degree = sum(graph_min_degrees) / total_graphs
+        avg_degree = sum(graph_avg_degrees) / total_graphs
 
         return {
             "max_degree": max_degree,
