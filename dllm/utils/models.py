@@ -67,7 +67,14 @@ def get_model(
             model_name_or_path, **params
         )
     except Exception:
-        model = transformers.AutoModel.from_pretrained(model_name_or_path, **params)
+        # Try causal LM (e.g., GPT-family) which exposes `logits` in outputs.
+        try:
+            model = transformers.AutoModelForCausalLM.from_pretrained(
+                model_name_or_path, **params
+            )
+        except Exception:
+            # Fallback to base AutoModel (may not expose `logits`)
+            model = transformers.AutoModel.from_pretrained(model_name_or_path, **params)
 
     # --- if quantized, prepare for LoRA / QLoRA training ---
     if load_in_4bit and quant_config is not None:
