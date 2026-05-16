@@ -69,6 +69,8 @@ class Evaluator:
                 "max_degree": 0.0,
                 "min_degree": 0.0,
                 "avg_degree": 0.0,
+                "avg_num_connected_components": 0.0,
+                "avg_largest_connected_component_size": 0.0,
                 "total_nodes": 0,
                 "total_edges": 0,
             }
@@ -76,6 +78,8 @@ class Evaluator:
         graph_max_degrees = []
         graph_min_degrees = []
         graph_avg_degrees = []
+        graph_component_counts = []
+        graph_largest_component_sizes = []
 
         for graph in graphs:
             degrees = [degree for _, degree in graph.degree()]
@@ -88,17 +92,29 @@ class Evaluator:
                 graph_min_degrees.append(0)
                 graph_avg_degrees.append(0.0)
 
+            components = list(nx.connected_components(graph))
+            graph_component_counts.append(len(components))
+            graph_largest_component_sizes.append(
+                max((len(component) for component in components), default=0)
+            )
+
         total_nodes = sum(graph.number_of_nodes() for graph in graphs)
         total_edges = sum(graph.number_of_edges() for graph in graphs)
 
         max_degree = sum(graph_max_degrees) / total_graphs
         min_degree = sum(graph_min_degrees) / total_graphs
         avg_degree = sum(graph_avg_degrees) / total_graphs
+        avg_num_connected_components = sum(graph_component_counts) / total_graphs
+        avg_largest_connected_component_size = sum(
+            graph_largest_component_sizes
+        ) / total_graphs
 
         return {
             "max_degree": max_degree,
             "min_degree": min_degree,
             "avg_degree": avg_degree,
+            "avg_num_connected_components": avg_num_connected_components,
+            "avg_largest_connected_component_size": avg_largest_connected_component_size,
             "total_nodes": total_nodes,
             "total_edges": total_edges,
         }
