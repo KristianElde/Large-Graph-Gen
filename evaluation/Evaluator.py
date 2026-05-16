@@ -71,8 +71,12 @@ class Evaluator:
                 "avg_degree": 0.0,
                 "avg_num_connected_components": 0.0,
                 "avg_largest_connected_component_size": 0.0,
-                "total_nodes": 0,
-                "total_edges": 0,
+                "avg_nodes": 0.0,
+                "min_nodes": 0,
+                "max_nodes": 0,
+                "avg_edges": 0.0,
+                "min_edges": 0,
+                "max_edges": 0,
             }
 
         graph_max_degrees = []
@@ -80,8 +84,13 @@ class Evaluator:
         graph_avg_degrees = []
         graph_component_counts = []
         graph_largest_component_sizes = []
+        graph_node_counts = []
+        graph_edge_counts = []
 
         for graph in graphs:
+            graph_node_counts.append(graph.number_of_nodes())
+            graph_edge_counts.append(graph.number_of_edges())
+
             degrees = [degree for _, degree in graph.degree()]
             if degrees:
                 graph_max_degrees.append(max(degrees))
@@ -98,9 +107,6 @@ class Evaluator:
                 max((len(component) for component in components), default=0)
             )
 
-        total_nodes = sum(graph.number_of_nodes() for graph in graphs)
-        total_edges = sum(graph.number_of_edges() for graph in graphs)
-
         max_degree = sum(graph_max_degrees) / total_graphs
         min_degree = sum(graph_min_degrees) / total_graphs
         avg_degree = sum(graph_avg_degrees) / total_graphs
@@ -108,6 +114,8 @@ class Evaluator:
         avg_largest_connected_component_size = sum(
             graph_largest_component_sizes
         ) / total_graphs
+        avg_nodes = sum(graph_node_counts) / total_graphs
+        avg_edges = sum(graph_edge_counts) / total_graphs
 
         return {
             "max_degree": max_degree,
@@ -115,8 +123,12 @@ class Evaluator:
             "avg_degree": avg_degree,
             "avg_num_connected_components": avg_num_connected_components,
             "avg_largest_connected_component_size": avg_largest_connected_component_size,
-            "total_nodes": total_nodes,
-            "total_edges": total_edges,
+            "avg_nodes": avg_nodes,
+            "min_nodes": min(graph_node_counts),
+            "max_nodes": max(graph_node_counts),
+            "avg_edges": avg_edges,
+            "min_edges": min(graph_edge_counts),
+            "max_edges": max(graph_edge_counts),
         }
 
     def eval_fraction_unique_non_isomorphic(
