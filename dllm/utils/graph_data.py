@@ -101,7 +101,46 @@ def infer_graph_tokenizer_stats(
         "num_edge_types": num_edge_types,
     }
 
+def tokenize_graphs_with_strategy(
+    graphs,
+    graph_tokenizer,
+    lm_strategy: GraphLMTokenizerStrategy,
+    *,
+    labeled_graph: bool = False,
+    dataset_name: str | None = None,
+) -> list[dict[str, list[int]]]:
+    """
+    Like the original but converts graph token ids through
+    the chosen LM strategy instead of a raw integer offset shift.
+ 
+    The returned rows have `input_ids` and `labels` as lists of LLM token ids
+    ready to be fed into MDLMTrainer.
+    """
+    # Import here to avoid circular deps when used standalone
+    from dllm.utils.graph_data import pyg_graph_to_simple_graph_data
+ 
+    rows: list[dict[str, list[int]]] = []
+    for graph in graphs:
+        data = pyg_graph_to_simple_graph_data(
+            graph,
+            labeled_graph=labeled_graph,
+            dataset_name=dataset_name,
+        )
+        graph_tokens = graph_tokenizer.tokenize(data)
+        lm_ids = lm_strategy.encode(graph_tokens.tolist())
+        if not lm_ids:
+            continue
+        rows.append({"input_ids": lm_ids, "labels": lm_ids.copy()})
+    return rows
 
+# def tokenize_graphs(
+#     graphs: Iterable[Any],
+#     graph_tokenizer,
+#     *,
+#     token_offset: int,
+#     labeled_graph: bool = False,
+#     dataset_name: str | None = None,
+# ) -> list[dict[str, list[int]]]:
 def tokenize_graphs(
     graphs: Iterable[Any],
     graph_tokenizer,
@@ -110,6 +149,11 @@ def tokenize_graphs(
     labeled_graph: bool = False,
     dataset_name: str | None = None,
 ) -> list[dict[str, list[int]]]:
+    """
+    Original approach: raw id shift into a reserved embedding block.
+
+    Returns rows with `input_ids` and `labels` as lists of ints.
+    """
     rows: list[dict[str, list[int]]] = []
 
     for graph in graphs:

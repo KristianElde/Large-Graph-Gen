@@ -4,7 +4,7 @@ Fine-tune LLaDA on a graph dataset using AutoGraph tokens.
 Example:
     PYTHONPATH=. accelerate launch \
         --config_file scripts/accelerate_configs/ddp.yaml --num_processes 1 \
-        examples/llada/graph_pt.py \
+        examples/llada/graph_ft.py \
         --pyg_dataset MUTAG \
         --data_root ./data/pyg \
         --model_name_or_path GSAI-ML/LLaDA-8B-Base
@@ -153,6 +153,7 @@ def train():
         # Some pretrained tokenizers (e.g., GPT-2) do not include a mask token by default.
         if tokenizer.mask_token is None:
             tokenizer.add_special_tokens({"mask_token": "<|mdm_mask|>"})
+            ## TODO: Add graph special tokens here if integrating the tokeniser
         base_vocab_size = len(tokenizer)
         graph_vocab_size = len(graph_tokenizer)
         model.resize_token_embeddings(base_vocab_size + graph_vocab_size)

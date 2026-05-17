@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=dllm
-#SBATCH --nodes=1
-#SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=24
-#SBATCH --ntasks-per-node=1
-#SBATCH --partition=mllm_safety
-#SBATCH --quotatype=spot
-#SBATCH --output=./.logs/%x-%j.out
-#SBATCH --err=./.logs/%x-%j.err
-#SBATCH --requeue
-#SBATCH --time=3-00:00:00
+#SBATCH --job-name=train
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=02:00:00
+#SBATCH --output=outputs/train_%A.out
+#SBATCH --error=outputs/train_%A.err
+
+module purge
+module load 2024
+module load GCC/13.3.0
+module load Miniconda3/24.7.1-0
+module load Mamba/24.9.0-0
+
+source activate dllm
 
 # ===== Cluster variables =====
 NUM_NODES=${SLURM_NNODES}
@@ -41,7 +46,7 @@ export PYTHONPATH=.
 
 # ===== Default options =====
 accelerate_config="zero2"
-script_path="scripts/examples/llada_sft.py"
+script_path="./examples/llada/graph_ft.py"
 
 # ===== Parse arguments =====
 # Stop parsing known options as soon as we hit an unknown one

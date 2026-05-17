@@ -19,34 +19,41 @@ module load GCC/13.3.0
 module load Miniconda3/24.7.1-0
 module load Mamba/24.9.0-0
 
-# 2. Recreate the environment from scratch
+# 2. Recreate the environment from scratch, matching the README install flow
 echo "Removing any existing environment..."
-mamba env remove -n dllm-env --yes || true
+conda env remove -n dllm -y || true
 
 echo "Creating a clean base environment..."
-mamba create -n dllm-env --yes -c pytorch -c conda-forge python=3.11 pip pytorch torchvision "libstdcxx-ng>=13"
+conda create -n dllm python=3.10 -y
 
 # 3. Activate environment
 echo "Activating environment..."
 source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate dllm-env
+conda activate dllm
 
-# 4. Ensure clean environment (isolate from system packages)
-unset PYTHONPATH
-export PYTHONNOUSERSITE=1
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+# 4. Install PyTorch with CUDA 12.4, matching the README
+echo "Installing PyTorch with CUDA 12.4..."
+conda install cuda=12.4 -c nvidia -y
+python -m pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+    --index-url https://download.pytorch.org/whl/cu124
 
-# 5. Install Python packages with pip
-echo "Installing Python dependencies with pip..."
-python -m pip install --upgrade pip
-python -m pip install --no-cache-dir -r requirements.txt
+# 5. Install the package itself
+echo "Installing dllm in editable mode..."
+python -m pip install -e .
 
-# 6. Verify installation
+# Ensure the launcher dependency is present inside the active env.]
+python -m pip install --no-cache-dir --upgrade \
+  accelerate lm-eval datasets pandas transformers xxhash torch-geometric peft torchmetrics
+python -m pip install trl
+
+# 6. Optional evaluation setup from the README
+git submodule update --init --recursive
+python -m pip install -e "lm-evaluation-harness[ifeval,math]"
+
+# 7. Verify installation
 echo "Verifying installation..."
 python --version
-python -m pip check
-python -c "import torch, pandas, safetensors, sklearn, transformers; print(f'PyTorch version: {torch.__version__}'); print(f'Pandas version: {pandas.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'Transformers version: {transformers.__version__}')"
-python -c "from torch_geometric.datasets import TUDataset; print('torch-geometric import successful!')"
+python -c "import torch, dllm; print(f'PyTorch version: {torch.__version__}'); print('dllm import successful')"
 
-# 7. Installation complete
+# 8. Installation complete
 echo "Installation complete!"
