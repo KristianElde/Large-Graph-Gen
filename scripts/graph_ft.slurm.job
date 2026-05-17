@@ -40,7 +40,7 @@ SCRIPT_PATH="examples/llada/graph_ft.py"
 DEFAULT_ARGS=(
   --pyg_dataset MUTAG
   --data_root ./data/pyg
-  --model_name_or_path GSAI-ML/LLaDA-8B-Base
+  --model_name_or_path .models/a2d/Qwen3-0.6B
   --token_strategy selective_special
 )
 
@@ -70,3 +70,5 @@ python -m accelerate.commands.launch \
   --num_processes "${NUM_PROCESSES}" \
   "${SCRIPT_PATH}" \
   "${SCRIPT_ARGS[@]}"
+
+# python dllm/pipelines/a2d/convert.py --model_name_or_path "Qwen/Qwen3-0.6B" --output_dir ".models/a2d/Qwen3-0.6B"
