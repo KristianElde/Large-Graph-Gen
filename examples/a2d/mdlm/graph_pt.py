@@ -67,7 +67,7 @@ class DataArguments:
 class TrainingArguments(dllm.core.trainers.MDLMConfig):
     output_dir: str = ".models/Qwen3/mdlm/graph-pt"
     group_by_length: bool = False
-    num_train_epochs: float = 3
+    num_train_epochs: float = 50
     learning_rate: float = 2e-5
     per_device_train_batch_size: int = 4
     per_device_eval_batch_size: int = 4
@@ -168,27 +168,7 @@ def initialise_special_token_embeddings(
     lm_tokenizer,
     structural_tokens: list[str],
 ) -> None:
-    """
-    For every token in *structural_tokens* that was newly added to the
-    vocabulary, set its embedding row to the mean of the base-model's
-    embeddings for the inner word (the text between the angle-brackets).
-
-    Tokens that were already present in the vocabulary are skipped — their
-    embeddings are already meaningful.
-
-    The function operates in-place and is a no-op on non-main processes
-    (safe to call inside PartialState().local_main_process_first()).
-
-    Parameters
-    ----------
-    model:
-        The language model whose input embedding table will be updated.
-    lm_tokenizer:
-        The tokenizer that was used to add the special tokens.  Must have
-        already had `add_special_tokens(...)` called on it.
-    structural_tokens:
-        List of special-token strings, e.g. ["<node>", "<edge>", ...].
-    """
+    
     embedding_matrix = model.get_input_embeddings().weight  # (vocab, d_model)
 
     # We need the *original* vocab embeddings as the source for mean-pooling.
@@ -303,11 +283,6 @@ def train():
     dllm.utils.print_args_main(model_args, data_args, training_args)
     dllm.utils.initial_training_setup(model_args, data_args, training_args)
 
-    # ------------------------------------------------------------------
-    # All data preparation runs on the local main process first so that
-    # only one process writes to disk / downloads data.  Other processes
-    # wait at wait_for_everyone() below.
-    # ------------------------------------------------------------------
     with accelerate.PartialState().local_main_process_first():
 
         # --- Graph data -----------------------------------------------
@@ -330,19 +305,14 @@ def train():
         lm_strategy = None   # only set for text_mapping / selective_special
 
         if strategy == "original":
-            # ----------------------------------------------------------
-            # All graph token ids are shifted by base_vocab_size and the
-            # model embedding table is extended by the full graph vocab.
-            # No inner-word init is applied: each new row is randomly
-            # initialised (mean-zero Gaussian from resize_token_embeddings),
-            # which is standard for large anonymous token tables.
-            # ----------------------------------------------------------
+            
             base_vocab_size = len(tokenizer)
             graph_vocab_size = len(graph_tokenizer)
             model.resize_token_embeddings(base_vocab_size + graph_vocab_size)
             logger.info(
                 f"[original] Added {graph_vocab_size} graph token embeddings. "
                 f"New vocab size: {base_vocab_size + graph_vocab_size}"
+                f"Original vocab size: {base_vocab_size}"
             )
             tokenized_dataset = build_token_dataset_original(
                 graphs,
@@ -355,10 +325,6 @@ def train():
             )
 
         elif strategy == "text_mapping":
-            # ----------------------------------------------------------
-            # Every graph token is rendered as text using the existing LM
-            # vocabulary.  No new tokens are added; no resize needed.
-            # ----------------------------------------------------------
             lm_strategy = build_lm_tokenizer_strategy(
                 "text_mapping",
                 tokenizer,
