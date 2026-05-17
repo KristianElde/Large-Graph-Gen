@@ -9,6 +9,7 @@ Example:
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -170,6 +171,62 @@ def tokenize_graphs(
         rows.append({"input_ids": sequence, "labels": sequence.copy()})
 
     return rows
+
+
+def sample_k_hop_subgraphs(
+    graph: Any,
+    centers: Iterable[int],
+    *,
+    num_hops: int = 2,
+    max_samples: int = 256,
+    seed: int = 0,
+    dataset_name: str | None = None,
+) -> list[Any]:
+    """Sample graph-level training examples from a large PyG graph.
+
+    This is useful for node-level datasets such as Elliptic Bitcoin, where we
+    want to fine-tune a graph tokenizer on many smaller subgraphs instead of a
+    single giant graph.
+    """
+    from torch_geometric.data import Data
+    from torch_geometric.utils import k_hop_subgraph
+
+    edge_index = torch.as_tensor(graph.edge_index, dtype=torch.long)
+    num_nodes = getattr(graph, "num_nodes", None)
+    if num_nodes is None:
+        num_nodes = int(edge_index.max().item()) + 1 if edge_index.numel() > 0 else 0
+
+    ordered_centers = [int(center) for center in centers]
+    if not ordered_centers:
+        return []
+
+    random.Random(seed).shuffle(ordered_centers)
+
+    x = getattr(graph, "x", None)
+    edge_attr = getattr(graph, "edge_attr", None)
+
+    samples: list[Any] = []
+    for center in ordered_centers[:max_samples]:
+        subset, sub_edge_index, _, edge_mask = k_hop_subgraph(
+            center,
+            num_hops,
+            edge_index,
+            relabel_nodes=True,
+            num_nodes=int(num_nodes),
+        )
+        if sub_edge_index.numel() == 0 and subset.numel() == 0:
+            continue
+
+        sample = Data(edge_index=sub_edge_index, num_nodes=int(subset.numel()))
+        if x is not None:
+            sample.x = x[subset]
+        if edge_attr is not None:
+            sample.edge_attr = edge_attr[edge_mask]
+        if dataset_name is not None:
+            sample.dataset_name = dataset_name
+        samples.append(sample)
+
+    return samples
 
 
 def save_graph_tokenizer_metadata(output_dir: str | Path, metadata: dict[str, Any]) -> None:
