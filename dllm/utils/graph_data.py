@@ -141,6 +141,7 @@ def tokenize_graphs_with_strategy(
 #     labeled_graph: bool = False,
 #     dataset_name: str | None = None,
 # ) -> list[dict[str, list[int]]]:
+
 def tokenize_graphs(
     graphs: Iterable[Any],
     graph_tokenizer,
