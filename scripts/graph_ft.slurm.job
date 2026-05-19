@@ -35,7 +35,7 @@ export NCCL_ASYNC_ERROR_HANDLING=1
 # Defaults mirror the command you ran interactively.
 ACCELERATE_CONFIG="ddp"
 NUM_PROCESSES=1
-SCRIPT_PATH="examples/llada/graph_ft.py"
+SCRIPT_PATH="examples/a2d/mdlm/graph_pt.py"
 
 DEFAULT_ARGS=(
   --pyg_dataset MUTAG

@@ -67,10 +67,10 @@ class DataArguments:
 class TrainingArguments(dllm.core.trainers.MDLMConfig):
     output_dir: str = ".models/Qwen3/mdlm/graph-pt"
     group_by_length: bool = False
-    num_train_epochs: float = 50
+    num_train_epochs: float = 100
     learning_rate: float = 2e-5
-    per_device_train_batch_size: int = 4
-    per_device_eval_batch_size: int = 4
+    per_device_train_batch_size: int = 16
+    per_device_eval_batch_size: int = 16
 
 
 # ---------------------------------------------------------------------------
@@ -295,11 +295,6 @@ def train():
         model = dllm.utils.get_model(model_args=model_args_no_lora)
         tokenizer = dllm.utils.get_tokenizer(model_args=model_args_no_lora)
 
-        # Ensure a mask token exists (required by MDLM)
-        if tokenizer.mask_token is None:
-            tokenizer.add_special_tokens({"mask_token": "<|mdm_mask|>"})
-            model.resize_token_embeddings(len(tokenizer))
-
         # --- Strategy-specific setup ----------------------------------
         strategy = data_args.token_strategy
         lm_strategy = None   # only set for text_mapping / selective_special
@@ -346,15 +341,6 @@ def train():
             )
 
         else:
-            # strategy == "selective_special"
-            # ----------------------------------------------------------
-            # Only 6 structural tokens (e.g. <node>, <edge>, <bos_graph>,
-            # <eos_graph>, <node_sep>, <edge_sep>) are added as genuine
-            # special tokens.  Their embeddings are then initialised from
-            # the mean of the base-model embeddings for the inner word
-            # (the text between the angle-brackets), giving the model a
-            # warm, semantically grounded starting point.
-            # ----------------------------------------------------------
             lm_strategy = build_lm_tokenizer_strategy(
                 "selective_special_tokens",
                 tokenizer,
