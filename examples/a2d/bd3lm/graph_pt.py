@@ -64,13 +64,14 @@ class DataArguments:
 
 
 @dataclass
-class TrainingArguments(dllm.core.trainers.MDLMConfig):
-    output_dir: str = ".models/Qwen3/mdlm/graph-pt"
+class TrainingArguments(dllm.core.trainers.BD3LMConfig):
+    output_dir: str = ".models/Qwen3/bd3lm/graph-pt"
     group_by_length: bool = False
     num_train_epochs: float = 100
     learning_rate: float = 2e-5
     per_device_train_batch_size: int = 16
     per_device_eval_batch_size: int = 16
+    block_size: int = 32
 
 
 # ---------------------------------------------------------------------------
@@ -99,82 +100,7 @@ def select_graphs(dataset, max_graphs: int, seed: int):
         indices = indices[: min(max_graphs, len(indices))]
     return [dataset[i] for i in indices]
 
-def normalize_dataset_name(dataset_name: str) -> str:
-    return dataset_name.strip().lower().replace("-", "_")
 
-
-def load_graph_samples(data_args: DataArguments, seed: int):
-    """
-    Unified loader for all supported PyG datasets.
-    Returns (graphs, canonical_dataset_name).
-    Replaces the separate load_pyg_dataset + select_graphs calls in train().
-    """
-    try:
-        from torch_geometric.datasets import EllipticBitcoinDataset, MalNetTiny, TUDataset
-    except ImportError as exc:
-        raise ImportError(
-            "torch-geometric is required for graph fine-tuning. "
-            "Install it before running this script."
-        ) from exc
-
-    dataset_key = normalize_dataset_name(data_args.pyg_dataset)
-
-    if dataset_key in {"malnet", "malnet_tiny", "malnettiny"}:
-        dataset = MalNetTiny(root=data_args.data_root, split=None)
-        if len(dataset) == 0:
-            raise ValueError("PyG dataset 'MalNetTiny' is empty.")
-        indices = list(range(len(dataset)))
-        random.Random(seed).shuffle(indices)
-        if data_args.max_graphs > 0:
-            indices = indices[: min(data_args.max_graphs, len(indices))]
-        return [dataset[i] for i in indices], "MalNetTiny"
-
-    if dataset_key in {"elliptic", "elliptic_bitcoin", "ellipticbitcoindataset"}:
-        dataset = EllipticBitcoinDataset(root=data_args.data_root)
-        if len(dataset) == 0:
-            raise ValueError("PyG dataset 'EllipticBitcoinDataset' is empty.")
-
-        data = dataset[0]
-        node_centers = torch.arange(int(data.num_nodes))
-
-        y = getattr(data, "y", None)
-        if y is not None and y.numel() == int(data.num_nodes):
-            known_mask = y.reshape(-1) != 2
-            node_centers = node_centers[known_mask]
-
-        train_mask = getattr(data, "train_mask", None)
-        if train_mask is not None and train_mask.numel() == int(data.num_nodes):
-            node_centers = node_centers[train_mask.reshape(-1)]
-
-        test_mask = getattr(data, "test_mask", None)
-        if not len(node_centers) and test_mask is not None and test_mask.numel() == int(data.num_nodes):
-            node_centers = torch.arange(int(data.num_nodes))[test_mask.reshape(-1)]
-
-        if not len(node_centers):
-            node_centers = torch.arange(int(data.num_nodes))
-
-        graphs = sample_k_hop_subgraphs(
-            data,
-            node_centers.tolist(),
-            num_hops=data_args.elliptic_num_hops,  # see DataArguments change below
-            max_samples=data_args.max_graphs,
-            seed=seed,
-            dataset_name="EllipticBitcoinDataset",
-        )
-        if not graphs:
-            raise ValueError("No Elliptic Bitcoin subgraphs could be sampled.")
-        return graphs, "EllipticBitcoinDataset"
-
-    # Default: TUDataset
-    dataset = TUDataset(root=data_args.data_root, name=data_args.pyg_dataset)
-    if len(dataset) == 0:
-        raise ValueError(f"PyG dataset '{data_args.pyg_dataset}' is empty.")
-    indices = list(range(len(dataset)))
-    random.Random(seed).shuffle(indices)
-    if data_args.max_graphs > 0:
-        indices = indices[: min(data_args.max_graphs, len(indices))]
-    return [dataset[i] for i in indices], data_args.pyg_dataset
-    
 def build_graph_tokenizer(data_args: DataArguments, graphs):
     stats = infer_graph_tokenizer_stats(graphs, labeled_graph=data_args.labeled_graph)
     tokenizer = TokenizerFactory.get_tokenizer(
@@ -476,16 +402,16 @@ def train():
     # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------
-    trainer = dllm.core.trainers.MDLMTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=tokenized_dataset["train"],
-        eval_dataset=tokenized_dataset.get("test"),
-        args=training_args,
-        data_collator=transformers.DataCollatorForSeq2Seq(
-            tokenizer,
-            return_tensors="pt",
-            padding=True,
+    trainer = dllm.core.trainers.BD3LMTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=tokenized_dataset["train"],
+    eval_dataset=tokenized_dataset.get("test"),
+    args=training_args,
+    data_collator=transformers.DataCollatorForSeq2Seq(
+        tokenizer,
+        return_tensors="pt",
+        padding=True,
         ),
     )
 
