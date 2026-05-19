@@ -3,10 +3,10 @@ from typing import Sequence
 
 import numpy as np
 
-import networkx as nx
 import torch
+import networkx as nx
 
-from degree_mmd import DegreeMMD
+from .degree_mmd import DegreeMMD
 
 
 from graph_tokenization import (
