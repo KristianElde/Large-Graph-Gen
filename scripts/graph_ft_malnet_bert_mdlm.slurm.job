@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=graph_ft_malnet_mdlm
-#SBATCH --partition=gpu_h100
+#SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
@@ -41,6 +41,8 @@ DEFAULT_ARGS=(
   --model_name_or_path .models/a2d/Qwen3-0.6B
   --token_strategy selective_special
   --output_dir .models/a2d/Qwen3/mdlm/malnet-graph-pt
+  --max_nodes_per_graph 2048
+  --malnet_num_hops 3
   
   # --- Memory Safety Net ---
   --per_device_train_batch_size 1

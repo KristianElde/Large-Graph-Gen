@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import transformers
+import os
+import datetime
 
 from dllm.core.schedulers import BaseAlphaScheduler, LinearAlphaScheduler
 from dllm.utils.configs import TrainingArguments
@@ -98,6 +100,32 @@ class MDLMTrainer(transformers.Trainer):
         else:
             raise NotImplementedError
         return loss_weights
+
+    def save_model(self, output_dir: str | None = None, *args, **kwargs):
+        """Save the model into a uniquely named checkpoint directory.
+
+        If the provided `output_dir` has a basename starting with "checkpoint",
+        append a timestamp to that basename instead of overwriting the folder.
+        Otherwise create a new directory with a timestamp suffix.
+        """
+        # Determine base output directory
+        if output_dir is None:
+            output_dir = getattr(self.args, "output_dir", None) or "."
+
+        base = str(output_dir)
+        parent = os.path.dirname(base)
+        basename = os.path.basename(base) or "checkpoint"
+
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        if basename.startswith("checkpoint"):
+            new_basename = f"{basename}-{ts}"
+        else:
+            new_basename = f"{basename}-checkpoint-{ts}"
+
+        new_output_dir = os.path.join(parent, new_basename)
+        os.makedirs(new_output_dir, exist_ok=True)
+
+        return super().save_model(new_output_dir, *args, **kwargs)
 
     @torch.no_grad()
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):

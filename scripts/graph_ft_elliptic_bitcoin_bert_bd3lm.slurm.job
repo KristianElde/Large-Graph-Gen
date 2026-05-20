@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=graph_ft_elliptic_bitcoin_mdlm
-#SBATCH --partition=gpu_h100
+#SBATCH --job-name=graph_ft_elliptic_bitcoin_bd3lm
+#SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=12:00:00
-#SBATCH --output=outputs/graph_ft_elliptic_bitcoin_mdlm_%A.out
-#SBATCH --error=outputs/graph_ft_elliptic_bitcoin_mdlm_%A.err
+#SBATCH --output=outputs/graph_ft_elliptic_bitcoin_bd3lm_%A.out
+#SBATCH --error=outputs/graph_ft_elliptic_bitcoin_bd3lm_%A.err
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH=.
 export NCCL_ASYNC_ERROR_HANDLING=1
 
-# Defaults mirror the a2d MDLM graph fine-tuning example.
+# Defaults mirror the a2d BD3LM graph fine-tuning example.
 ACCELERATE_CONFIG="ddp"
 NUM_PROCESSES=1
 SCRIPT_PATH="examples/a2d/bd3lm/graph_pt.py"
@@ -43,6 +43,8 @@ DEFAULT_ARGS=(
   --model_name_or_path .models/a2d/Qwen3-0.6B
   --token_strategy selective_special
   --output_dir .models/a2d/Qwen3/bd3lm/elliptic-bitcoin-graph-pt
+  --max_nodes_per_graph 2048
+  --elliptic_num_hops 3
 )
 
 # Allow overriding the script path and appending extra script args.
