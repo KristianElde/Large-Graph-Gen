@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=graph_ft_malnet_mdlm
+#SBATCH --job-name=graph_ft_elliptic_bitcoin_qwen_mdlm_full
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=12:00:00
-#SBATCH --output=outputs/graph_ft_malnet_mdlm_%A.out
-#SBATCH --error=outputs/graph_ft_malnet_mdlm_%A.err
+#SBATCH --output=outputs/graph_ft_elliptic_bitcoin_qwen_mdlm_full_%A.out
+#SBATCH --error=outputs/graph_ft_elliptic_bitcoin_qwen_mdlm_full_%A.err
 
 set -euo pipefail
 
 mkdir -p outputs
 
-# Match the README-style environment, then activate the installed env.
 module purge
 module load 2024
 module load GCC/13.3.0
@@ -30,27 +29,24 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH=.
 export NCCL_ASYNC_ERROR_HANDLING=1
 
-# Defaults mirror the a2d MDLM graph fine-tuning example.
 ACCELERATE_CONFIG="ddp"
 NUM_PROCESSES=1
 SCRIPT_PATH="examples/a2d/mdlm/graph_pt.py"
 
 DEFAULT_ARGS=(
-  --pyg_dataset MalNet
+  --pyg_dataset EllipticBitcoinDataset
   --data_root ./data/pyg
   --model_name_or_path .models/a2d/Qwen3-0.6B
   --token_strategy selective_special
-  --output_dir .models/a2d/Qwen3/mdlm/malnet-graph-pt
+  --output_dir .models/a2d/Qwen3/mdlm/elliptic-bitcoin-graph-pt-full
   --max_nodes_per_graph 2048
-  --malnet_num_hops 3
-  
-  # --- Memory Safety Net ---
+  --elliptic_num_hops 3
+
   --per_device_train_batch_size 1
   --gradient_accumulation_steps 8
   --gradient_checkpointing True
 )
 
-# Allow overriding the script path and appending extra script args.
 SCRIPT_ARGS=("${DEFAULT_ARGS[@]}")
 if [[ $# -gt 0 ]]; then
   case "$1" in

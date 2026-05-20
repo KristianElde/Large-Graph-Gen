@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=graph_ft_malnet_bd3lm
+#SBATCH --job-name=graph_ft_elliptic_bitcoin_bert_bd3lm_lora
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=12:00:00
-#SBATCH --output=outputs/graph_ft_malnet_bd3lm_%A.out
-#SBATCH --error=outputs/graph_ft_malnet_bd3lm_%A.err
+#SBATCH --output=outputs/graph_ft_elliptic_bitcoin_bert_bd3lm_lora_%A.out
+#SBATCH --error=outputs/graph_ft_elliptic_bitcoin_bert_bd3lm_lora_%A.err
 
 set -euo pipefail
 
 mkdir -p outputs
 
-# Match the README-style environment, then activate the installed env.
 module purge
 module load 2024
 module load GCC/13.3.0
@@ -21,8 +20,6 @@ module load Mamba/24.9.0-0
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
-# Some conda activation hooks expect unset variables to be harmless.
-# `set -u` makes them fatal unless we relax nounset for activation.
 export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-}"
 set +u
 conda activate dllm
@@ -32,22 +29,25 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH=.
 export NCCL_ASYNC_ERROR_HANDLING=1
 
-# Defaults mirror the a2d BD3LM graph fine-tuning example.
 ACCELERATE_CONFIG="ddp"
 NUM_PROCESSES=1
 SCRIPT_PATH="examples/a2d/bd3lm/graph_pt.py"
 
 DEFAULT_ARGS=(
-  --pyg_dataset MalNet
+  --pyg_dataset EllipticBitcoinDataset
   --data_root ./data/pyg
-  --model_name_or_path .models/a2d/Qwen3-0.6B
+  --model_name_or_path .models/editflow/ModernBERT-large
   --token_strategy selective_special
-  --output_dir .models/a2d/Qwen3/bd3lm/malnet-graph-pt
+  --output_dir .models/editflow/ModernBERT-large/bd3lm/elliptic-bitcoin-graph-pt-lora
   --max_nodes_per_graph 2048
-  --malnet_num_hops 3
+  --elliptic_num_hops 3
+
+  --per_device_train_batch_size 1
+  --gradient_accumulation_steps 8
+  --gradient_checkpointing True
+  --lora True
 )
 
-# Allow overriding the script path and appending extra script args.
 SCRIPT_ARGS=("${DEFAULT_ARGS[@]}")
 if [[ $# -gt 0 ]]; then
   case "$1" in
