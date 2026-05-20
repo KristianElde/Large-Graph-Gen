@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=graph_ft
+#SBATCH --job-name=graph_ft_elliptic_bitcoin_mdlm
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=02:00:00
-#SBATCH --output=outputs/graph_ft_%A.out
-#SBATCH --error=outputs/graph_ft_%A.err
+#SBATCH --time=12:00:00
+#SBATCH --output=outputs/graph_ft_elliptic_bitcoin_mdlm_%A.out
+#SBATCH --error=outputs/graph_ft_elliptic_bitcoin_mdlm_%A.err
 
 set -euo pipefail
 
@@ -32,17 +32,17 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH=.
 export NCCL_ASYNC_ERROR_HANDLING=1
 
-# Defaults mirror the command you ran interactively.
+# Defaults mirror the a2d MDLM graph fine-tuning example.
 ACCELERATE_CONFIG="ddp"
 NUM_PROCESSES=1
 SCRIPT_PATH="examples/a2d/mdlm/graph_pt.py"
 
 DEFAULT_ARGS=(
-  --pyg_dataset MUTAG
+  --pyg_dataset EllipticBitcoinDataset
   --data_root ./data/pyg
   --model_name_or_path .models/a2d/Qwen3-0.6B
   --token_strategy selective_special
-  --output_dir .models/a2d/Qwen3/mdlm/graph-pt
+  --output_dir .models/a2d/Qwen3/mdlm/elliptic-bitcoin-graph-pt
 )
 
 # Allow overriding the script path and appending extra script args.
@@ -66,10 +66,8 @@ echo "  script path       : ${SCRIPT_PATH}"
 printf '  script args       : %q ' "${SCRIPT_ARGS[@]}"
 echo
 
-python -m accelerate.commands.launch \
+time python -m accelerate.commands.launch \
   --config_file "scripts/accelerate_configs/${ACCELERATE_CONFIG}.yaml" \
   --num_processes "${NUM_PROCESSES}" \
   "${SCRIPT_PATH}" \
   "${SCRIPT_ARGS[@]}"
-
-# python dllm/pipelines/a2d/convert.py --model_name_or_path "Qwen/Qwen3-0.6B" --output_dir ".models/a2d/Qwen3-0.6B"
