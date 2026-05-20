@@ -12,6 +12,7 @@ import transformers
 import dllm
 from dllm.utils.graph_data import (
     infer_graph_tokenizer_stats,
+    pyg_graph_to_simple_graph_data,
     save_graph_tokenizer_metadata,
     tokenize_graphs,
 )
@@ -19,6 +20,7 @@ from dllm.utils.graph_token_strategies import (
     build_lm_tokenizer_strategy,
     tokenize_graphs_with_strategy,
 )
+from graph_evaluation import GraphEvaluatorCallback
 from graph_tokenization import TokenizerFactory
 
 logger = dllm.utils.get_default_logger(__name__)
@@ -42,7 +44,7 @@ class DataArguments:
     graph_tokenizer_type: str = "autograph"
     max_graphs: int = 256
     test_size: float = 0.1
-    max_length: int = 512
+    max_length: int = 1024
     labeled_graph: bool = False
     undirected: bool = True
     append_eos: bool = True
@@ -61,6 +63,9 @@ class DataArguments:
             )
         },
     )
+    elliptic_num_hops: int = 2
+    malnet_num_hops: int = 2
+    max_nodes_per_graph: int = 1024
 
 
 @dataclass
@@ -71,109 +76,18 @@ class TrainingArguments(dllm.core.trainers.MDLMConfig):
     learning_rate: float = 2e-5
     per_device_train_batch_size: int = 16
     per_device_eval_batch_size: int = 16
-
+    graph_eval_generation_batch_size: int = 16
+    graph_eval_num_generated_graphs: int = 64
+    graph_eval_steps: int = 128
+    graph_eval_max_new_tokens: int = 1024
+    graph_eval_block_size: int = 32
+    graph_eval_temperature: float = 0.0
 
 # ---------------------------------------------------------------------------
 # Dataset loading helpers
 # ---------------------------------------------------------------------------
 
-def load_pyg_dataset(dataset_name: str, root: str):
-    try:
-        from torch_geometric.datasets import TUDataset
-    except ImportError as exc:
-        raise ImportError(
-            "torch-geometric is required for graph fine-tuning. "
-            "Install it before running this script."
-        ) from exc
-
-    dataset = TUDataset(root=root, name=dataset_name)
-    if len(dataset) == 0:
-        raise ValueError(f"PyG dataset '{dataset_name}' is empty.")
-    return dataset
-
-
-def select_graphs(dataset, max_graphs: int, seed: int):
-    indices = list(range(len(dataset)))
-    random.Random(seed).shuffle(indices)
-    if max_graphs > 0:
-        indices = indices[: min(max_graphs, len(indices))]
-    return [dataset[i] for i in indices]
-
-def normalize_dataset_name(dataset_name: str) -> str:
-    return dataset_name.strip().lower().replace("-", "_")
-
-
-def load_graph_samples(data_args: DataArguments, seed: int):
-    """
-    Unified loader for all supported PyG datasets.
-    Returns (graphs, canonical_dataset_name).
-    Replaces the separate load_pyg_dataset + select_graphs calls in train().
-    """
-    try:
-        from torch_geometric.datasets import EllipticBitcoinDataset, MalNetTiny, TUDataset
-    except ImportError as exc:
-        raise ImportError(
-            "torch-geometric is required for graph fine-tuning. "
-            "Install it before running this script."
-        ) from exc
-
-    dataset_key = normalize_dataset_name(data_args.pyg_dataset)
-
-    if dataset_key in {"malnet", "malnet_tiny", "malnettiny"}:
-        dataset = MalNetTiny(root=data_args.data_root, split=None)
-        if len(dataset) == 0:
-            raise ValueError("PyG dataset 'MalNetTiny' is empty.")
-        indices = list(range(len(dataset)))
-        random.Random(seed).shuffle(indices)
-        if data_args.max_graphs > 0:
-            indices = indices[: min(data_args.max_graphs, len(indices))]
-        return [dataset[i] for i in indices], "MalNetTiny"
-
-    if dataset_key in {"elliptic", "elliptic_bitcoin", "ellipticbitcoindataset"}:
-        dataset = EllipticBitcoinDataset(root=data_args.data_root)
-        if len(dataset) == 0:
-            raise ValueError("PyG dataset 'EllipticBitcoinDataset' is empty.")
-
-        data = dataset[0]
-        node_centers = torch.arange(int(data.num_nodes))
-
-        y = getattr(data, "y", None)
-        if y is not None and y.numel() == int(data.num_nodes):
-            known_mask = y.reshape(-1) != 2
-            node_centers = node_centers[known_mask]
-
-        train_mask = getattr(data, "train_mask", None)
-        if train_mask is not None and train_mask.numel() == int(data.num_nodes):
-            node_centers = node_centers[train_mask.reshape(-1)]
-
-        test_mask = getattr(data, "test_mask", None)
-        if not len(node_centers) and test_mask is not None and test_mask.numel() == int(data.num_nodes):
-            node_centers = torch.arange(int(data.num_nodes))[test_mask.reshape(-1)]
-
-        if not len(node_centers):
-            node_centers = torch.arange(int(data.num_nodes))
-
-        graphs = sample_k_hop_subgraphs(
-            data,
-            node_centers.tolist(),
-            num_hops=data_args.elliptic_num_hops,  # see DataArguments change below
-            max_samples=data_args.max_graphs,
-            seed=seed,
-            dataset_name="EllipticBitcoinDataset",
-        )
-        if not graphs:
-            raise ValueError("No Elliptic Bitcoin subgraphs could be sampled.")
-        return graphs, "EllipticBitcoinDataset"
-
-    # Default: TUDataset
-    dataset = TUDataset(root=data_args.data_root, name=data_args.pyg_dataset)
-    if len(dataset) == 0:
-        raise ValueError(f"PyG dataset '{data_args.pyg_dataset}' is empty.")
-    indices = list(range(len(dataset)))
-    random.Random(seed).shuffle(indices)
-    if data_args.max_graphs > 0:
-        indices = indices[: min(data_args.max_graphs, len(indices))]
-    return [dataset[i] for i in indices], data_args.pyg_dataset
+from dllm.data.load_graph_data import load_pyg_dataset, select_graphs, normalize_dataset_name, load_graph_samples
     
 def build_graph_tokenizer(data_args: DataArguments, graphs):
     stats = infer_graph_tokenizer_stats(graphs, labeled_graph=data_args.labeled_graph)
@@ -185,7 +99,12 @@ def build_graph_tokenizer(data_args: DataArguments, graphs):
         undirected=data_args.undirected,
         append_eos=data_args.append_eos,
     )
-    tokenizer.set_num_nodes(stats["max_num_nodes"])
+    # Allow capping the tokenizer's num_nodes via CLI. A value <=0 means no cap.
+    max_nodes = stats["max_num_nodes"]
+    if getattr(data_args, "max_nodes_per_graph", 0) and data_args.max_nodes_per_graph > 0:
+        max_nodes = min(max_nodes, int(data_args.max_nodes_per_graph))
+    tokenizer.set_num_nodes(max_nodes)
+    stats["max_num_nodes"] = int(max_nodes)
     if data_args.labeled_graph:
         tokenizer.set_num_node_and_edge_types(
             num_node_types=stats["num_node_types"],
@@ -361,14 +280,95 @@ def train():
     with accelerate.PartialState().local_main_process_first():
 
         # --- Graph data -----------------------------------------------
-        raw_dataset = load_pyg_dataset(data_args.pyg_dataset, data_args.data_root)
-        graphs = select_graphs(raw_dataset, data_args.max_graphs, training_args.seed)
+        graphs, canonical_dataset_name = load_graph_samples(data_args, training_args.seed)
+
+        # Log graph size statistics (nodes) so we can see what the network
+        # will receive. This prints min/max/avg/median for quick inspection.
+        try:
+            from statistics import median
+
+            node_counts = []
+            for g in graphs:
+                # Use existing helper to coerce node count from PyG object
+                simple = pyg_graph_to_simple_graph_data(g)
+                node_counts.append(int(simple.num_nodes))
+
+            if node_counts:
+                node_counts_sorted = sorted(node_counts)
+                min_nodes = node_counts_sorted[0]
+                max_nodes = node_counts_sorted[-1]
+                avg_nodes = sum(node_counts_sorted) / len(node_counts_sorted)
+                med_nodes = int(median(node_counts_sorted))
+                logger.info(
+                    f"Prepared {len(node_counts)} graphs — nodes: min={min_nodes},"
+                    f" max={max_nodes}, avg={avg_nodes:.2f}, median={med_nodes}"
+                )
+            else:
+                logger.info("No graphs prepared for training.")
+        except Exception:
+            logger.exception("Failed to compute graph size statistics")
+
         graph_tokenizer, stats = build_graph_tokenizer(data_args, graphs)
 
         # --- Model + LM tokenizer (no LoRA yet; resize before LoRA) ---
         model_args_no_lora = replace(model_args, lora=False)
         model = dllm.utils.get_model(model_args=model_args_no_lora)
         tokenizer = dllm.utils.get_tokenizer(model_args=model_args_no_lora)
+
+        # --- Check model context size vs graph token lengths ----------------
+        # Compute per-graph token lengths (graph-token counts) and, for
+        # non-original strategies, estimate resulting LM token lengths.
+        try:
+            # graph_tokenizer may be created later for some codepaths; build a
+            # lightweight tokenizer now to inspect lengths.
+            tmp_graph_tokenizer, tmp_stats = build_graph_tokenizer(data_args, graphs)
+            graph_token_lengths = []
+            for g in graphs:
+                simple = pyg_graph_to_simple_graph_data(g)
+                toks = tmp_graph_tokenizer.tokenize(simple)
+                graph_token_lengths.append(len(toks))
+
+            max_graph_tokens = max(graph_token_lengths) if graph_token_lengths else 0
+
+            model_max_pos = getattr(getattr(model, "config", None), "max_position_embeddings", None)
+            logger.info(f"Max graph-token length: {max_graph_tokens}; model max_position_embeddings: {model_max_pos}")
+
+            # If using a mapping strategy that expands tokens to text / LM tokens,
+            # we try to estimate the LM token length for a representative sample.
+            if data_args.token_strategy != "original":
+                # Build the lm_strategy used later for tokenization checks.
+                lm_strategy_check = None
+                try:
+                    lm_strategy_check = build_lm_tokenizer_strategy(
+                        data_args.token_strategy if data_args.token_strategy != "selective_special" else "selective_special",
+                        tokenizer,
+                        tmp_graph_tokenizer,
+                        model=None,
+                    )
+                except Exception:
+                    lm_strategy_check = None
+
+                if lm_strategy_check is not None and graph_token_lengths:
+                    # take the largest graph as representative
+                    largest = graphs[graph_token_lengths.index(max_graph_tokens)]
+                    simple_l = pyg_graph_to_simple_graph_data(largest)
+                    gtoks = tmp_graph_tokenizer.tokenize(simple_l).tolist()
+                    lm_ids = lm_strategy_check.encode(gtoks)
+                    lm_len = len(lm_ids)
+                    logger.info(f"Estimated LM-token length for largest graph (strategy={data_args.token_strategy}): {lm_len}")
+                    if model_max_pos is not None and lm_len > model_max_pos:
+                        logger.warning(
+                            "Estimated LM token length for graphs exceeds model's positional embedding size. "
+                            "Consider increasing model context size or limiting graph token length (data_args.max_length)."
+                        )
+            else:
+                if model_max_pos is not None and max_graph_tokens > model_max_pos:
+                    logger.warning(
+                        "Graph token length exceeds model's positional embedding size. "
+                        "Consider limiting data_args.max_length or using a model with larger context."
+                    )
+        except Exception:
+            logger.exception("Failed to estimate graph token lengths vs model context")
 
         # --- Strategy-specific setup ----------------------------------
         strategy = data_args.token_strategy
@@ -389,7 +389,7 @@ def train():
                 graph_tokenizer,
                 token_offset=base_vocab_size,
                 labeled_graph=data_args.labeled_graph,
-                dataset_name=data_args.dataset_name or data_args.pyg_dataset,
+                dataset_name=data_args.dataset_name or canonical_dataset_name,
                 test_size=data_args.test_size,
                 seed=training_args.seed,
             )
@@ -410,7 +410,7 @@ def train():
                 graph_tokenizer,
                 lm_strategy,
                 labeled_graph=data_args.labeled_graph,
-                dataset_name=data_args.dataset_name or data_args.pyg_dataset,
+                dataset_name=data_args.dataset_name or canonical_dataset_name,
                 test_size=data_args.test_size,
                 seed=training_args.seed,
             )
@@ -450,24 +450,31 @@ def train():
             if strategy == "original"
             else len(tokenizer)
         )
-        save_graph_tokenizer_metadata(
-            training_args.output_dir,
-            {
-                "token_strategy": strategy,
-                "pyg_dataset": data_args.pyg_dataset,
-                "dataset_name": data_args.dataset_name or data_args.pyg_dataset,
-                "graph_tokenizer_type": data_args.graph_tokenizer_type,
-                "labeled_graph": data_args.labeled_graph,
-                "max_num_nodes": stats["max_num_nodes"],
-                "num_node_types": stats["num_node_types"],
-                "num_edge_types": stats["num_edge_types"],
-                "base_vocab_size": base_vocab_size_for_meta,
-                "graph_vocab_size": len(graph_tokenizer) if strategy == "original" else 0,
-                "graph_token_offset": base_vocab_size_for_meta if strategy == "original" else 0,
-            },
-        )
+        graph_metadata = {
+            "token_strategy": strategy,
+            "pyg_dataset": data_args.pyg_dataset,
+            "dataset_name": data_args.dataset_name or canonical_dataset_name,
+            "graph_tokenizer_type": data_args.graph_tokenizer_type,
+            "labeled_graph": data_args.labeled_graph,
+            "max_num_nodes": stats["max_num_nodes"],
+            "num_node_types": stats["num_node_types"],
+            "num_edge_types": stats["num_edge_types"],
+            "base_vocab_size": base_vocab_size_for_meta,
+            "graph_vocab_size": len(graph_tokenizer) if strategy == "original" else 0,
+            "graph_token_offset": base_vocab_size_for_meta if strategy == "original" else 0,
+        }
+        save_graph_tokenizer_metadata(training_args.output_dir, graph_metadata)
         if lm_strategy is not None:
             lm_strategy.save_metadata(training_args.output_dir)
+
+        evaluator_train_data = [
+            pyg_graph_to_simple_graph_data(
+                graph,
+                labeled_graph=data_args.labeled_graph,
+                dataset_name=data_args.dataset_name or canonical_dataset_name,
+            )
+            for graph in graphs
+        ]
 
     # Wait for data prep to complete on all ranks before training starts
     accelerate.PartialState().wait_for_everyone()
@@ -487,6 +494,23 @@ def train():
             return_tensors="pt",
             padding=True,
         ),
+    )
+    trainer.add_callback(
+        GraphEvaluatorCallback(
+            trainer=trainer,
+            graph_tokenizer=graph_tokenizer,
+            train_data=evaluator_train_data,
+            token_strategy=graph_metadata["token_strategy"],
+            lm_strategy=lm_strategy,
+            graph_token_offset=graph_metadata["graph_token_offset"],
+            graph_vocab_size=graph_metadata["graph_vocab_size"],
+            generation_batch_size=training_args.graph_eval_generation_batch_size,
+            num_generated_graphs=training_args.graph_eval_num_generated_graphs,
+            steps=training_args.graph_eval_steps,
+            max_new_tokens=training_args.graph_eval_max_new_tokens,
+            block_size=training_args.graph_eval_block_size,
+            temperature=training_args.graph_eval_temperature,
+        )
     )
 
     trainer.train()
