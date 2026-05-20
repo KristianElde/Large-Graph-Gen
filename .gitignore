@@ -138,6 +138,6 @@ dmypy.json
 /.logs/
 /.models/
 
-data
+/data
 *.out
 *.err
