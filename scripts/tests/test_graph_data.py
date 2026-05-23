@@ -1,4 +1,5 @@
-"""
+"""Graph data tests.
+
 Run with:
     pytest scripts/tests/test_graph_data.py
 """
@@ -9,6 +10,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 from torch_geometric.data import Data
 
@@ -46,6 +48,36 @@ def test_tokenize_graphs_shifts_tokens_into_reserved_range():
     expected = (tokenizer.tokenize(graph) + 100).tolist()
     assert rows[0]["input_ids"] == expected
     assert rows[0]["labels"] == expected
+
+
+def test_autograph_decode_strict_raises_on_out_of_range_token():
+    graph = SimpleGraphData(
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        num_nodes=3,
+    )
+    tokenizer = AutoGraphTokenizer(max_length=-1, undirected=True, append_eos=True)
+    tokenizer.set_num_nodes(3)
+
+    tokens = tokenizer.tokenize(graph).clone()
+    tokens[1] = len(tokenizer) + 1
+
+    with pytest.raises(ValueError, match="out of range"):
+        tokenizer.decode(tokens, strict=True)
+
+
+def test_autograph_decode_strict_raises_on_bad_grammar():
+    graph = SimpleGraphData(
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        num_nodes=3,
+    )
+    tokenizer = AutoGraphTokenizer(max_length=-1, undirected=True, append_eos=True)
+    tokenizer.set_num_nodes(3)
+
+    tokens = tokenizer.tokenize(graph).clone()
+    tokens[1] = tokenizer.ladj
+
+    with pytest.raises(ValueError, match="Expected node token"):
+        tokenizer.decode(tokens, strict=True)
 
 
 def test_infer_graph_tokenizer_stats_uses_graph_size():

@@ -20,11 +20,13 @@ from dllm.utils.graph_token_strategies import (
     build_lm_tokenizer_strategy,
     tokenize_graphs_with_strategy,
 )
+from dllm.utils.graph_dict_strategy import build_text_dict_strategy, build_dataset_from_pyg_graphs
+
 from graph_tokenization import TokenizerFactory
 
 logger = dllm.utils.get_default_logger(__name__)
 
-VALID_STRATEGIES = ("original", "text_mapping", "selective_special")
+VALID_STRATEGIES = ("original", "text_mapping", "selective_special", "text_dict")
 
 
 # ---------------------------------------------------------------------------
@@ -52,15 +54,18 @@ class DataArguments:
     dataset_name: str | None = None
     disable_caching: bool = False
     token_strategy: str = field(
-        default="selective_special",
+        default="text_dict",
         metadata={
             "help": (
                 "How to map graph tokens to LLM token ids. "
-                "Choices: original | text_mapping | selective_special. "
+                "Choices: original | text_mapping | selective_special | text_dict. "
                 "'original'          — shift all graph ids into a reserved embedding block. "
                 "'text_mapping'      — render every graph token as text, no new tokens added. "
                 "'selective_special' — add only 6 structural tokens as special tokens "
-                "                     with inner-word mean embedding initialisation."
+                "                     with inner-word mean embedding initialisation. "
+                "'text_dict'         — serialise graph as adjacency dict string with "
+                "                     per-graph prompt (node count + index range). "
+                "                     No vocab modification. Recommended default."
             )
         },
     )
@@ -83,6 +88,7 @@ class TrainingArguments(dllm.core.trainers.BD3LMConfig):
 # ---------------------------------------------------------------------------
 
 from dllm.data.load_graph_data import load_pyg_dataset, select_graphs, normalize_dataset_name, load_graph_samples
+
 
 def build_graph_tokenizer(data_args: DataArguments, graphs):
     stats = infer_graph_tokenizer_stats(graphs, labeled_graph=data_args.labeled_graph)
@@ -134,15 +140,6 @@ def _mean_embedding_for_word(
         meaningful direction,
       - is strictly better than single-token approximation when the inner word
         is split across multiple sub-word pieces.
-
-    Alternatives considered
-    -----------------------
-    • Full-token text "<node>" → tokenised pieces often include the brackets,
-      which are punctuation with weak semantics; the brackets' embeddings add
-      noise rather than signal.
-    • Random Gaussian init → cheapest, but slowest convergence.
-    • Copy the nearest existing token → reasonable, but picking "nearest" is
-      ambiguous and fragile across tokenisers.
     """
     ids = lm_tokenizer(word, add_special_tokens=False)["input_ids"]
     if not ids:
@@ -157,28 +154,21 @@ def initialise_special_token_embeddings(
     lm_tokenizer,
     structural_tokens: list[str],
 ) -> None:
-    
+
     embedding_matrix = model.get_input_embeddings().weight  # (vocab, d_model)
 
-    # We need the *original* vocab embeddings as the source for mean-pooling.
-    # At this point the matrix has already been resized, so we work with a
-    # detached snapshot of the pre-existing rows only.
     original_vocab_size = embedding_matrix.shape[0] - len(structural_tokens)
 
     for token in structural_tokens:
         token_id = lm_tokenizer.convert_tokens_to_ids(token)
 
-        # Skip tokens that already existed before resizing
         if token_id < original_vocab_size:
             logger.debug(
                 f"[emb_init] '{token}' already in base vocab (id={token_id}), skipping."
             )
             continue
 
-        # Extract inner word: "<node>" -> "node", "<bos_graph>" -> "bos_graph"
         inner = token.strip("<>")
-
-        # Use the original rows only as source (slice the live matrix)
         source_rows = embedding_matrix[:original_vocab_size].detach()
         init_vec = _mean_embedding_for_word(inner, lm_tokenizer, source_rows)
 
@@ -253,6 +243,37 @@ def build_token_dataset_strategy(
     return dataset.train_test_split(test_size=test_size, seed=seed)
 
 
+def build_token_dataset_text_dict(
+    graphs,
+    strategy,
+    tokenizer,
+    *,
+    max_length: int | None = None,
+    test_size: float = 0.1,
+    seed: int = 42,
+) -> datasets.DatasetDict:
+    """
+    text_dict strategy: graph → adjacency dict string with per-graph prompt.
+
+    Each sample receives a prompt of the form:
+        "Generate a graph with exactly N nodes (indices 0 to N-1). ..."
+    where N is the node count of *that specific graph*.  The prompt tokens
+    receive labels=-100 so the BD3LM trainer never masks or trains on them.
+    """
+    rows = build_dataset_from_pyg_graphs(
+        graphs,
+        strategy,
+        max_tokens=max_length,
+        # prompt=None intentionally — per-graph prompts are generated internally
+    )
+    if not rows:
+        raise ValueError("No graph samples survived tokenization + prompt prepending.")
+    dataset = datasets.Dataset.from_list(rows)
+    if test_size <= 0.0:
+        return datasets.DatasetDict({"train": dataset})
+    return dataset.train_test_split(test_size=test_size, seed=seed)
+
+
 # ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
@@ -277,8 +298,7 @@ def train():
         # --- Graph data -----------------------------------------------
         graphs, canonical_dataset_name = load_graph_samples(data_args, training_args.seed)
 
-        # Log graph size statistics (nodes) so we can see what the network
-        # will receive. This prints min/max/avg/median for quick inspection.
+        # Log graph size statistics so we can see what the network receives.
         try:
             from statistics import median
 
@@ -309,64 +329,41 @@ def train():
         model = dllm.utils.get_model(model_args=model_args_no_lora)
         tokenizer = dllm.utils.get_tokenizer(model_args=model_args_no_lora)
 
-        # --- Check model context size vs graph token lengths ----------------
-        try:
-            tmp_graph_tokenizer, tmp_stats = build_graph_tokenizer(data_args, graphs)
-            graph_token_lengths = []
-            for g in graphs:
-                simple = pyg_graph_to_simple_graph_data(g)
-                toks = tmp_graph_tokenizer.tokenize(simple)
-                graph_token_lengths.append(len(toks))
-
-            max_graph_tokens = max(graph_token_lengths) if graph_token_lengths else 0
-            model_max_pos = getattr(getattr(model, "config", None), "max_position_embeddings", None)
-            logger.info(f"Max graph-token length: {max_graph_tokens}; model max_position_embeddings: {model_max_pos}")
-
-            if data_args.token_strategy != "original":
-                lm_strategy_check = None
-                try:
-                    lm_strategy_check = build_lm_tokenizer_strategy(
-                        data_args.token_strategy if data_args.token_strategy != "selective_special" else "selective_special",
-                        tokenizer,
-                        tmp_graph_tokenizer,
-                        model=None,
-                    )
-                except Exception:
-                    lm_strategy_check = None
-
-                if lm_strategy_check is not None and graph_token_lengths:
-                    largest = graphs[graph_token_lengths.index(max_graph_tokens)]
-                    simple_l = pyg_graph_to_simple_graph_data(largest)
-                    gtoks = tmp_graph_tokenizer.tokenize(simple_l).tolist()
-                    lm_ids = lm_strategy_check.encode(gtoks)
-                    lm_len = len(lm_ids)
-                    logger.info(f"Estimated LM-token length for largest graph (strategy={data_args.token_strategy}): {lm_len}")
-                    if model_max_pos is not None and lm_len > model_max_pos:
-                        logger.warning(
-                            "Estimated LM token length for graphs exceeds model's positional embedding size. "
-                            "Consider increasing model context size or limiting graph token length (data_args.max_length)."
-                        )
-            else:
-                if model_max_pos is not None and max_graph_tokens > model_max_pos:
-                    logger.warning(
-                        "Graph token length exceeds model's positional embedding size. "
-                        "Consider limiting data_args.max_length or using a model with larger context."
-                    )
-        except Exception:
-            logger.exception("Failed to estimate graph token lengths vs model context")
-
         # --- Strategy-specific setup ----------------------------------
         strategy = data_args.token_strategy
-        lm_strategy = None   # only set for text_mapping / selective_special
+        lm_strategy = None   # only set for text_mapping / selective_special / text_dict
 
-        if strategy == "original":
-            
+        if strategy == "text_dict":
+            # ----------------------------------------------------------------
+            # text_dict: no vocab modifications; graph → adjacency dict string
+            # with a per-graph prompt that informs the model of the node count
+            # and valid index range before the graph body begins.
+            # ----------------------------------------------------------------
+            lm_strategy = build_text_dict_strategy(
+                tokenizer,
+                labeled=data_args.labeled_graph,
+            )
+            logger.info(
+                "[text_dict] Graphs serialised as adjacency dict strings with "
+                "per-graph prompts (node count + index range). "
+                f"Vocab size unchanged: {len(tokenizer)}"
+            )
+            tokenized_dataset = build_token_dataset_text_dict(
+                graphs,
+                lm_strategy,
+                tokenizer,
+                max_length=data_args.max_length,
+                test_size=data_args.test_size,
+                seed=training_args.seed,
+            )
+
+        elif strategy == "original":
             base_vocab_size = len(tokenizer)
             graph_vocab_size = len(graph_tokenizer)
             model.resize_token_embeddings(base_vocab_size + graph_vocab_size)
             logger.info(
                 f"[original] Added {graph_vocab_size} graph token embeddings. "
-                f"New vocab size: {base_vocab_size + graph_vocab_size}"
+                f"New vocab size: {base_vocab_size + graph_vocab_size}. "
                 f"Original vocab size: {base_vocab_size}"
             )
             tokenized_dataset = build_token_dataset_original(
@@ -400,7 +397,7 @@ def train():
                 seed=training_args.seed,
             )
 
-        else:
+        else:  # selective_special
             lm_strategy = build_lm_tokenizer_strategy(
                 "selective_special_tokens",
                 tokenizer,
@@ -424,6 +421,26 @@ def train():
                 test_size=data_args.test_size,
                 seed=training_args.seed,
             )
+
+        # --- Check model context size vs sequence lengths ----------------
+        try:
+            model_max_pos = getattr(
+                getattr(model, "config", None), "max_position_embeddings", None
+            )
+            if model_max_pos is not None:
+                train_ids = tokenized_dataset["train"]["input_ids"]
+                max_seq_len = max(len(ids) for ids in train_ids) if train_ids else 0
+                logger.info(
+                    f"Max tokenized sequence length: {max_seq_len}; "
+                    f"model max_position_embeddings: {model_max_pos}"
+                )
+                if max_seq_len > model_max_pos:
+                    logger.warning(
+                        "Some sequences exceed model's positional embedding size. "
+                        "Consider reducing --max_length or using a model with larger context."
+                    )
+        except Exception:
+            logger.exception("Failed to check sequence lengths vs model context")
 
         # --- LoRA (applied after all embedding resizes) ---------------
         if model_args.lora:
@@ -451,26 +468,26 @@ def train():
                 "graph_token_offset": base_vocab_size_for_meta if strategy == "original" else 0,
             },
         )
-        if lm_strategy is not None:
+        if lm_strategy is not None and hasattr(lm_strategy, "save_metadata"):
             lm_strategy.save_metadata(training_args.output_dir)
 
     # Wait for data prep to complete on all ranks before training starts
     accelerate.PartialState().wait_for_everyone()
-    logger.info(f"Start graph MDLM pre-training (strategy={strategy})...")
+    logger.info(f"Start graph BD3LM pre-training (strategy={strategy})...")
 
     # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------
     trainer = dllm.core.trainers.BD3LMTrainer(
-    model=model,
-    tokenizer=tokenizer,
-    train_dataset=tokenized_dataset["train"],
-    eval_dataset=tokenized_dataset.get("test"),
-    args=training_args,
-    data_collator=transformers.DataCollatorForSeq2Seq(
-        tokenizer,
-        return_tensors="pt",
-        padding=True,
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=tokenized_dataset["train"],
+        eval_dataset=tokenized_dataset.get("test"),
+        args=training_args,
+        data_collator=transformers.DataCollatorForSeq2Seq(
+            tokenizer,
+            return_tensors="pt",
+            padding=True,
         ),
     )
 

@@ -1,5 +1,4 @@
-"""
-Graph generation evaluation callback for Trainer validation.
+"""Graph generation evaluation callback for Trainer validation.
 
 Run:
     python -u /home/scur0503/dllm/examples/a2d/mdlm/graph_pt.py \
@@ -16,6 +15,7 @@ import torch
 import transformers
 
 import dllm
+from dllm.utils.graph_token_strategies import graph_tokens_to_text
 
 from .evaluator import Evaluator
 
@@ -39,6 +39,7 @@ class GraphEvaluatorCallback(transformers.TrainerCallback):
         max_new_tokens: int = 1024,
         block_size: int = 32,
         temperature: float = 0.0,
+        strict_decode: bool = True,
         metric_prefix: str = "eval_graph",
     ) -> None:
         super().__init__()
@@ -51,6 +52,7 @@ class GraphEvaluatorCallback(transformers.TrainerCallback):
         self.graph_vocab_size = graph_vocab_size
         self.generation_batch_size = generation_batch_size
         self.num_generated_graphs = num_generated_graphs
+        self.strict_decode = strict_decode
         self.metric_prefix = metric_prefix
 
         if self.generation_batch_size <= 0:
@@ -76,8 +78,11 @@ class GraphEvaluatorCallback(transformers.TrainerCallback):
             return [self.graph_token_offset + self.graph_tokenizer.sos]
         return self.lm_strategy.encode([self.graph_tokenizer.sos])
 
-    def _lm_tokens_to_graph_tokens(self, sequences: torch.Tensor) -> torch.Tensor:
+    def _lm_tokens_to_graph_tokens(
+        self, sequences: torch.Tensor
+    ) -> tuple[torch.Tensor, int]:
         rows = []
+        decode_errors = 0
 
         for sequence in sequences.detach().cpu().tolist():
             if self.token_strategy == "original":
@@ -89,7 +94,23 @@ class GraphEvaluatorCallback(transformers.TrainerCallback):
                     < self.graph_token_offset + self.graph_vocab_size
                 ]
             else:
-                graph_ids = self.lm_strategy.decode(sequence)
+                try:
+                    graph_ids = self.lm_strategy.decode(
+                        sequence, strict=self.strict_decode
+                    )
+                except ValueError:
+                    decode_errors += 1
+                    try:
+                        graph_ids = self.lm_strategy.decode(sequence, strict=False)
+                        graph_text = graph_tokens_to_text(
+                            graph_ids, self.graph_tokenizer
+                        )
+                    except Exception:
+                        graph_text = self.trainer.processing_class.decode(
+                            sequence, skip_special_tokens=False
+                        )
+                    print(f"Unparseable graph number {decode_errors}: {graph_text}")
+                    continue
 
             if not graph_ids or graph_ids[0] != self.graph_tokenizer.sos:
                 graph_ids = [self.graph_tokenizer.sos] + graph_ids
@@ -103,7 +124,7 @@ class GraphEvaluatorCallback(transformers.TrainerCallback):
         )
         for i, row in enumerate(rows):
             batch[i, : row.numel()] = row
-        return batch
+        return batch, decode_errors
 
     def _json_ready_number(self, value: Any) -> float | int:
         if isinstance(value, np.generic):
@@ -143,13 +164,15 @@ class GraphEvaluatorCallback(transformers.TrainerCallback):
                 generated.extend(outputs.sequences.detach().cpu())
 
             generated_lm_tokens = torch.stack(generated)
-            generated_graph_tokens = self._lm_tokens_to_graph_tokens(
+            generated_graph_tokens, decode_errors = self._lm_tokens_to_graph_tokens(
                 generated_lm_tokens
             )
             metrics = Evaluator(tokenizer=self.graph_tokenizer)(
                 tokenized_graphs=generated_graph_tokens,
                 train_data=self.train_data,
+                total_gen_graphs=generated_lm_tokens.shape[0],
             )
+            metrics["lm_decode_errors"] = self._json_ready_number(decode_errors)
             return {
                 f"{self.metric_prefix}_{key}": self._json_ready_number(value)
                 for key, value in metrics.items()

@@ -36,7 +36,7 @@ SCRIPT_PATH="examples/a2d/bd3lm/graph_pt.py"
 DEFAULT_ARGS=(
   --pyg_dataset EllipticBitcoinDataset
   --data_root ./data/pyg
-  --model_name_or_path .models/editflow/ModernBERT-large
+  --model_name_or_path answerdotai/ModernBERT-large
   --token_strategy selective_special
   --output_dir .models/editflow/ModernBERT-large/bd3lm/elliptic-bitcoin-graph-pt-lora
   --max_nodes_per_graph 2048

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=graph_ft_malnet_bert_mdlm_full
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
@@ -36,7 +36,7 @@ SCRIPT_PATH="examples/a2d/mdlm/graph_pt.py"
 DEFAULT_ARGS=(
   --pyg_dataset MalNet
   --data_root ./data/pyg
-  --model_name_or_path .models/editflow/ModernBERT-large
+  --model_name_or_path answerdotai/ModernBERT-large
   --token_strategy selective_special
   --output_dir .models/editflow/ModernBERT-large/mdlm/malnet-graph-pt-full
   --max_nodes_per_graph 2048

@@ -1,3 +1,9 @@
+"""Graph generation evaluation metrics.
+
+Run the graph tokenization tests with:
+    pytest scripts/tests/test_graph_data.py
+"""
+
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -7,6 +13,7 @@ import torch
 import networkx as nx
 
 from .degree_mmd import DegreeMMD
+from dllm.utils.graph_token_strategies import graph_tokens_to_text
 
 
 from graph_tokenization import (
@@ -20,27 +27,51 @@ from graph_tokenization import (
 @dataclass
 class Evaluator:
     tokenizer: GraphTokenizer = AutoGraphTokenizer()
+    strict_decode: bool = True
 
     def __call__(
         self,
         tokenized_graphs: torch.Tensor,
         train_data: Sequence[SimpleGraphData],
+        total_gen_graphs: int | None = None,
     ):
-        total_graphs = tokenized_graphs.shape[0]
+        total_graphs = (
+            tokenized_graphs.shape[0]
+            if total_gen_graphs is None
+            else int(total_gen_graphs)
+        )
+
+        if total_graphs <= 0:
+            return {
+                "validity": 0.0,
+                "num_valid_graphs": 0,
+                "num_invalid_graphs": 0,
+                "num_total_generated_graphs": 0,
+                "uniqueness": 0.0,
+                "novelty": 0.0,
+                **self.graph_stats([]),
+                **self.power_law_exponent([]),
+                **self.edge_overlap([], []),
+                **DegreeMMD()(gen_graphs=[], train_graphs=[]),
+            }
 
         graphs = []
         i = 0
         for tokens in tokenized_graphs:
             try:
-                graph = self.tokenizer.decode(tokens)
+                graph = self.tokenizer.decode(tokens, strict=self.strict_decode)
                 graphs.append(graph)
             except:
                 i += 1
-                print(f"Unparseable graph number {i}")
+                print(
+                    f"Unparseable graph number {i}: "
+                    f"{graph_tokens_to_text(tokens, self.tokenizer)}"
+                )
 
         valid_graphs = len(graphs)
+        invalid_graphs = max(total_graphs - valid_graphs, 0)
 
-        validity = valid_graphs / total_graphs
+        validity = valid_graphs / total_graphs if total_graphs > 0 else 0.0
         nx_graphs = self._to_networkx_graphs(graphs)
         train_nx_graphs = self._to_networkx_graphs(train_data)
 
@@ -56,6 +87,9 @@ class Evaluator:
 
         return {
             "validity": validity,
+            "num_valid_graphs": valid_graphs,
+            "num_invalid_graphs": invalid_graphs,
+            "num_total_generated_graphs": total_graphs,
             "uniqueness": uniqueness,
             "novelty": novelty,
             **graph_stats,
@@ -252,7 +286,7 @@ class Evaluator:
 
         import math
 
-        def degree_sorted_edge_set(graph: nx.Graph) -> set[tuple[int, int]]:
+        def degree_sorted_edge_set(graph: nx.Graph) -> set[tuple[int, ...]]:
             """
             Relabel graph by ascending node degree and return canonical edge set.
             Ties are broken deterministically by string form of node ID.

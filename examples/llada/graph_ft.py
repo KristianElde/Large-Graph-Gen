@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Fine-tune LLaDA on a graph dataset using AutoGraph tokens.
 
@@ -16,8 +18,6 @@ This script converts each graph into an AutoGraph token sequence, shifts those
 token ids into a reserved embedding range, and trains with the repo's existing
 MDLM trainer so the batch format stays `input_ids` + `labels`.
 """
-
-from __future__ import annotations
 
 import os
 import random

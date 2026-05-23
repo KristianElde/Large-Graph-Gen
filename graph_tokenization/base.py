@@ -1,4 +1,11 @@
 from __future__ import annotations
+
+"""Graph tokenization base APIs.
+
+Run the graph tokenization tests with:
+    pytest scripts/tests/test_graph_data.py
+"""
+
 from abc import ABC, abstractmethod
 from .types import SimpleGraphData
 
@@ -9,7 +16,7 @@ class GraphTokenizer(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def decode(self, tokens):
+    def decode(self, tokens, strict: bool = False):
         raise NotImplementedError
 
 class TokenizerFactory:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Evaluate generated graphs from an MDLM graph checkpoint.
 
@@ -6,8 +8,6 @@ Run:
         --model_path /home/scur0503/dllm/.models/Qwen3/mdlm/graph-pt/checkpoint-final \
         --generation_batch_size 16
 """
-
-from __future__ import annotations
 
 import argparse
 import json
@@ -32,7 +32,10 @@ from dllm.utils.graph_data import (
     infer_graph_tokenizer_stats,
     pyg_graph_to_simple_graph_data,
 )
-from dllm.utils.graph_token_strategies import build_lm_tokenizer_strategy
+from dllm.utils.graph_token_strategies import (
+    build_lm_tokenizer_strategy,
+    graph_tokens_to_text,
+)
 from graph_evaluation.evaluator import Evaluator
 from graph_tokenization import TokenizerFactory
 
@@ -116,8 +119,9 @@ def lm_tokens_to_graph_tokens(
     graph_tokenizer,
     lm_strategy,
     metadata: dict[str, Any],
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, int]:
     rows = []
+    decode_errors = 0
     strategy = metadata.get("token_strategy", "selective_special")
 
     for sequence in sequences.detach().cpu().tolist():
@@ -130,7 +134,19 @@ def lm_tokens_to_graph_tokens(
                 if offset <= token_id < offset + vocab_size
             ]
         else:
-            graph_ids = lm_strategy.decode(sequence)
+            try:
+                graph_ids = lm_strategy.decode(sequence)
+            except ValueError:
+                decode_errors += 1
+                try:
+                    graph_ids = lm_strategy.decode(sequence, strict=False)
+                    graph_text = graph_tokens_to_text(graph_ids, graph_tokenizer)
+                except Exception:
+                    graph_text = lm_strategy.tokenizer.decode(
+                        sequence, skip_special_tokens=False
+                    )
+                print(f"Unparseable graph number {decode_errors}: {graph_text}")
+                continue
 
         if not graph_ids or graph_ids[0] != graph_tokenizer.sos:
             graph_ids = [graph_tokenizer.sos] + graph_ids
@@ -144,7 +160,7 @@ def lm_tokens_to_graph_tokens(
     )
     for i, row in enumerate(rows):
         batch[i, : row.numel()] = row
-    return batch
+    return batch, decode_errors
 
 
 def json_ready(value):
@@ -212,7 +228,7 @@ def main() -> None:
         generated.extend(outputs.sequences.detach().cpu())
 
     generated_lm_tokens = torch.stack(generated)
-    generated_graph_tokens = lm_tokens_to_graph_tokens(
+    generated_graph_tokens, decode_errors = lm_tokens_to_graph_tokens(
         generated_lm_tokens,
         graph_tokenizer,
         lm_strategy,
@@ -231,6 +247,7 @@ def main() -> None:
     metrics = Evaluator(tokenizer=graph_tokenizer)(
         tokenized_graphs=generated_graph_tokens,
         train_data=evaluator_train_data,
+        total_gen_graphs=generated_lm_tokens.shape[0],
     )
 
     # 4: Print metrics
@@ -243,6 +260,7 @@ def main() -> None:
                     "pyg_dataset": dataset_name,
                     "token_strategy": metadata.get("token_strategy"),
                     "num_generated_graphs": len(generated),
+                    "lm_decode_errors": decode_errors,
                     "graph_tokenizer_stats": graph_stats,
                 }
             ),

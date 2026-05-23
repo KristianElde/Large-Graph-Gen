@@ -1,36 +1,38 @@
-"""
-Graph-to-LLM tokenization strategies.
+from __future__ import annotations
+
+"""Graph-to-LLM tokenization strategies.
 
 Two alternatives to the current "shift-all-graph-ids" approach:
 
-  Strategy A — TextMapping
-    Converts every graph token into a short text string using a compact
-    human-readable format, then tokenises the whole sequence with the LLM
-    tokenizer.  No new tokens are added; no embedding resize needed.
+    Strategy A — TextMapping
+        Converts every graph token into a short text string using a compact
+        human-readable format, then tokenises the whole sequence with the LLM
+        tokenizer.  No new tokens are added; no embedding resize needed.
 
-    Format example:
-        "<graph_start> 0 1 2 <graph_ladj> 0 1 <graph_radj> <graph_end>"
+        Format example:
+                "<graph_start> 0 1 2 <graph_ladj> 0 1 <graph_radj> <graph_end>"
 
-    Node ids are rendered as plain integers (relative to idx_offset), so the
-    LLM's existing representations for digit strings are used directly.
+        Node ids are rendered as plain integers (relative to idx_offset), so the
+        LLM's existing representations for digit strings are used directly.
 
-  Strategy B — SelectiveSpecialTokens
-    Adds ONLY the small structural control tokens (<graph_start>, <graph_end>,
-    <graph_pad>, <graph_reset>, <graph_ladj>, <graph_radj>) as genuine special
-    tokens in the LLM tokenizer.  Node ids are rendered as plain integer
-    strings and tokenised normally, just like Strategy A, so structural tokens
-    remain atomic while node content uses the model's existing vocabulary.
+    Strategy B — SelectiveSpecialTokens
+        Adds ONLY the small structural control tokens (<graph_start>, <graph_end>,
+        <graph_pad>, <graph_reset>, <graph_ladj>, <graph_radj>) as genuine special
+        tokens in the LLM tokenizer.  Node ids are rendered as plain integer
+        strings and tokenised normally, just like Strategy A, so structural tokens
+        remain atomic while node content uses the model's existing vocabulary.
 
 Usage
 -----
 See `build_lm_tokenizer_strategy` for the recommended entry point.
 The returned object has:
-    .encode(graph_token_seq)  -> list[int]   (LLM token ids)
-    .decode(lm_token_ids)     -> list[int]   (graph token ids)
-    .tokenizer               -> the (possibly modified) HF tokenizer
-"""
+        .encode(graph_token_seq)  -> list[int]   (LLM token ids)
+        .decode(lm_token_ids)     -> list[int]   (graph token ids)
+        .tokenizer               -> the (possibly modified) HF tokenizer
 
-from __future__ import annotations
+Run the graph tokenization tests with:
+        pytest scripts/tests/test_graph_data.py
+"""
 
 import json
 from abc import ABC, abstractmethod
@@ -141,7 +143,11 @@ class GraphLMTokenizerStrategy(ABC):
         """Convert a graph-tokenizer id sequence to LLM input_ids."""
 
     @abstractmethod
-    def decode(self, lm_token_ids: list[int] | torch.Tensor) -> list[int]:
+    def decode(
+        self,
+        lm_token_ids: list[int] | torch.Tensor,
+        strict: bool = False,
+    ) -> list[int]:
         """
         Convert LLM input_ids back to graph-tokenizer ids.
 
@@ -228,7 +234,11 @@ class TextMappingStrategy(GraphLMTokenizerStrategy):
 
         return lm_ids
 
-    def decode(self, lm_token_ids: list[int] | torch.Tensor) -> list[int]:
+    def decode(
+        self,
+        lm_token_ids: list[int] | torch.Tensor,
+        strict: bool = False,
+    ) -> list[int]:
         """
         Re-construct graph token ids from LLM ids by greedy span matching
         against the reverse cache built during encode().
@@ -248,7 +258,15 @@ class TextMappingStrategy(GraphLMTokenizerStrategy):
                     matched = True
                     break
             if not matched:
+                if strict:
+                    raise ValueError(
+                        f"Unable to decode LM token span starting at position {i}: "
+                        f"{lm_token_ids[i:i + 8]}"
+                    )
                 i += 1  # skip unknown sub-token
+
+        if strict and not graph_ids:
+            raise ValueError("Decoded graph token sequence is empty.")
         return graph_ids
 
     def save_metadata(self, path: str | Path) -> None:
@@ -376,7 +394,11 @@ class SelectiveSpecialTokensStrategy(GraphLMTokenizerStrategy):
                 lm_ids.extend(self._lm_ids_for_non_structural(gid))
         return lm_ids
 
-    def decode(self, lm_token_ids: list[int] | torch.Tensor) -> list[int]:
+    def decode(
+        self,
+        lm_token_ids: list[int] | torch.Tensor,
+        strict: bool = False,
+    ) -> list[int]:
         if isinstance(lm_token_ids, torch.Tensor):
             lm_token_ids = lm_token_ids.tolist()
 
@@ -399,7 +421,15 @@ class SelectiveSpecialTokensStrategy(GraphLMTokenizerStrategy):
                     matched = True
                     break
             if not matched:
+                if strict:
+                    raise ValueError(
+                        f"Unable to decode LM token span starting at position {i}: "
+                        f"{lm_token_ids[i:i + 8]}"
+                    )
                 i += 1  # skip unknown sub-token
+
+        if strict and not graph_ids:
+            raise ValueError("Decoded graph token sequence is empty.")
         return graph_ids
 
     def save_metadata(self, path: str | Path) -> None:

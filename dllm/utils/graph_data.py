@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Import these helpers from your training or preprocessing script to convert
 graph samples into AutoGraph token sequences.
@@ -5,8 +7,6 @@ graph samples into AutoGraph token sequences.
 Example:
     from dllm.utils.graph_data import tokenize_graphs
 """
-
-from __future__ import annotations
 
 import json
 import random
