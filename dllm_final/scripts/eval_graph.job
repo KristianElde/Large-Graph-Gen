@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=graph_eval
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=03:00:00
+#SBATCH --chdir=/gpfs/home3/scur0503/dllm
+#SBATCH --output=outputs/graph_eval_%A.out
+#SBATCH --error=outputs/graph_eval_%A.err
+
+set -euo pipefail
+
+module purge
+module load 2024
+module load GCC/13.3.0
+module load Miniconda3/24.7.1-0
+module load Mamba/24.9.0-0
+
+source "$(conda info --base)/etc/profile.d/conda.sh"
+set +u
+conda activate dllm
+set -u
+
+export PYTHONNOUSERSITE=1
+export PYTHONPATH="$PWD:$PWD/src:${PYTHONPATH:-}"
+export TOKENIZERS_PARALLELISM=false
+
+GEN_GRAPH=".models/debug/final-assembled-newprompt-5000-min100/assembled_graph.json"
+OUT_JSON=".models/debug/final-assembled-newprompt-5000-min100/evaluation_metrics.json"
+
+echo "===== Job info ====="
+echo "Host: $(hostname)"
+echo "Date: $(date)"
+echo "Repo: $(pwd)"
+echo "Python: $(which python)"
+python -V
+echo "PYTHONPATH=${PYTHONPATH}"
+echo "GEN_GRAPH=${GEN_GRAPH}"
+echo "OUT_JSON=${OUT_JSON}"
+echo "===================="
+
+mkdir -p outputs
+
+if [[ ! -f "${GEN_GRAPH}" ]]; then
+  echo "ERROR: generated graph not found: ${GEN_GRAPH}" >&2
+  exit 1
+fi
+
+echo "===== Import checks ====="
+python - <<'PY'
+import sys
+print("python:", sys.executable)
+
+import numpy
+import networkx
+print("numpy ok")
+print("networkx ok")
+
+try:
+    import scipy
+    print("scipy ok")
+except Exception as e:
+    print("WARNING: scipy import failed:", repr(e))
+
+try:
+    import graph_tokenization
+    print("graph_tokenization ok")
+except Exception as e:
+    raise SystemExit(f"ERROR: graph_tokenization import failed: {e!r}")
+PY
+
+echo "===== Compile check ====="
+python -m py_compile scripts/evaluate_graphs.py
+
+echo "===== Running assembled graph evaluation ====="
+python scripts/evaluate_graphs.py \
+  --generated_graph_json "${GEN_GRAPH}" \
+  --out_json "${OUT_JSON}" \
+  --reference_dataset "MalNetTiny" \
+  --data_root "./data/pyg" \
+  --reference_max_graphs 512 \
+  --reference_max_nodes_per_graph 6000 \
+  --malnet_num_hops 2
+
+echo "===== Evaluation summary ====="
+python - <<'PY'
+import json
+from pathlib import Path
+
+p = Path(".models/debug/final-assembled-newprompt-5000-min100/evaluation_metrics.json")
+if not p.exists():
+    raise SystemExit(f"ERROR: No evaluation_metrics.json found at {p}")
+
+d = json.loads(p.read_text())
+
+print("validity_rate:", d.get("validity_rate"))
+print("structural_summary:")
+print(json.dumps(d.get("structural_summary", {}), indent=2))
+print("uniqueness_novelty:")
+print(json.dumps(d.get("uniqueness_novelty", {}), indent=2))
+print("mmd:")
+print(json.dumps(d.get("mmd", {}), indent=2))
+PY

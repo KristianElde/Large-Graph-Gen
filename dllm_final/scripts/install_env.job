@@ -1,0 +1,59 @@
+#!/bin/bash
+#SBATCH --job-name=install_env
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=32:00:00
+#SBATCH --output=outputs/install_env_%A.out
+#SBATCH --error=outputs/install_env_%A.err
+
+set -euo pipefail
+
+mkdir -p outputs
+
+# 1. Environment
+module purge
+module load 2024
+module load GCC/13.3.0
+module load Miniconda3/24.7.1-0
+module load Mamba/24.9.0-0
+
+# 2. Recreate the environment from scratch, matching the README install flow
+echo "Removing any existing environment..."
+conda env remove -n dllm -y || true
+
+echo "Creating a clean base environment..."
+conda create -n dllm python=3.10 -y
+
+# 3. Activate environment
+echo "Activating environment..."
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate dllm
+
+# 4. Install PyTorch with CUDA 12.4, matching the README
+echo "Installing PyTorch with CUDA 12.4..."
+conda install cuda=12.4 -c nvidia -y
+python -m pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# 5. Install the package itself
+echo "Installing dllm in editable mode..."
+python -m pip install -e .
+
+# Ensure the launcher dependency is present inside the active env.]
+python -m pip install --no-cache-dir --upgrade \
+  accelerate lm-eval datasets pandas transformers xxhash torch-geometric peft torchmetrics
+python -m pip install trl
+
+# 6. Optional evaluation setup from the README
+git submodule update --init --recursive
+python -m pip install -e "lm-evaluation-harness[ifeval,math]"
+
+# 7. Verify installation
+echo "Verifying installation..."
+python --version
+python -c "import torch, dllm; print(f'PyTorch version: {torch.__version__}'); print('dllm import successful')"
+
+# 8. Installation complete
+echo "Installation complete!"

@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=graph_ft_malnet_qwen_mdlm_full
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=12:00:00
+#SBATCH --output=outputs/graph_ft_malnet_qwen_mdlm_full_%A.out
+#SBATCH --error=outputs/graph_ft_malnet_qwen_mdlm_full_%A.err
+
+set -euo pipefail
+
+mkdir -p outputs
+
+module purge
+module load 2024
+module load GCC/13.3.0
+module load Miniconda3/24.7.1-0
+module load Mamba/24.9.0-0
+
+source "$(conda info --base)/etc/profile.d/conda.sh"
+
+export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-}"
+set +u
+conda activate dllm
+set -u
+
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=.
+export NCCL_ASYNC_ERROR_HANDLING=1
+
+ACCELERATE_CONFIG="ddp"
+NUM_PROCESSES=1
+SCRIPT_PATH="examples/a2d/mdlm/graph_pt.py"
+
+DEFAULT_ARGS=(
+  --pyg_dataset MalNet
+  --data_root ./data/pyg
+  --model_name_or_path /home/scur0503/dllm/.models/a2d/Qwen3-0.6B/mdlm/malnet-graph-pt-full/checkpoint-final #.models/a2d/Qwen3-0.6B
+  --token_strategy selective_special
+  --output_dir .models/a2d/Qwen3-0.6B/bd3lm/malnet-graph-pt-full
+  --max_nodes_per_graph 200
+  --malnet_num_hops 2
+  --per_device_train_batch_size 1
+  --gradient_accumulation_steps 8
+  --gradient_checkpointing True
+)
+
+SCRIPT_ARGS=("${DEFAULT_ARGS[@]}")
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    --script_path)
+      SCRIPT_PATH="$2"
+      shift 2
+      ;;
+  esac
+  if [[ $# -gt 0 ]]; then
+    SCRIPT_ARGS+=("$@")
+  fi
+fi
+
+echo "Launching graph fine-tuning"
+echo "  accelerate config : ${ACCELERATE_CONFIG}"
+echo "  num processes     : ${NUM_PROCESSES}"
+echo "  script path       : ${SCRIPT_PATH}"
+printf '  script args       : %q ' "${SCRIPT_ARGS[@]}"
+echo
+
+time python -m accelerate.commands.launch \
+  --config_file "scripts/accelerate_configs/${ACCELERATE_CONFIG}.yaml" \
+  --num_processes "${NUM_PROCESSES}" \
+  "${SCRIPT_PATH}" \
+  "${SCRIPT_ARGS[@]}"

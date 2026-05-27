@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=assemble_50_graphs
+#SBATCH --ntasks=1
+#SBATCH --partition=rome
+#SBATCH --cpus-per-task=4
+#SBATCH --time=01:00:00
+#SBATCH --chdir=/gpfs/home3/scur0503/dllm
+#SBATCH --output=outputs/assemble_50_graphs_%A.out
+#SBATCH --error=outputs/assemble_50_graphs_%A.err
+
+set -euo pipefail
+
+module purge
+module load 2024
+module load GCC/13.3.0
+module load Miniconda3/24.7.1-0
+module load Mamba/24.9.0-0
+
+source "$(conda info --base)/etc/profile.d/conda.sh"
+set +u
+conda activate dllm
+set -u
+
+export PYTHONNOUSERSITE=1
+export PYTHONPATH="$PWD:$PWD/src:${PYTHONPATH:-}"
+
+mkdir -p outputs
+
+EVAL_JSON=".models/debug/graph-mdlm-malnettiny-edgelist-h100-v1/graph_generation_eval.json"
+BASE_OUT=".models/debug/assembled_50_newprompt"
+
+if [[ ! -f "${EVAL_JSON}" ]]; then
+  echo "ERROR: missing ${EVAL_JSON}" >&2
+  exit 1
+fi
+
+mkdir -p "${BASE_OUT}"
+
+echo "Generating 50 assembled 5000-node graphs..."
+
+for SEED in $(seq 0 49); do
+  OUTDIR="${BASE_OUT}/graph_seed_${SEED}"
+
+  echo "===== seed ${SEED} ====="
+
+  python scripts/assemble.py \
+    --eval_json "${EVAL_JSON}" \
+    --target_nodes 5000 \
+    --out_dir "${OUTDIR}" \
+    --seed "${SEED}" \
+    --min_chunk_nodes 100
+done
+
+echo "===== Summary metrics ====="
+
+python - <<'PY'
+import json
+from pathlib import Path
+
+base = Path(".models/debug/assembled_50_newprompt")
+rows = []
+
+for p in sorted(base.glob("graph_seed_*/metrics.json")):
+    d = json.loads(p.read_text())
+    seed = int(p.parent.name.split("_")[-1])
+    rows.append((seed, d))
+
+print("num_graphs:", len(rows))
+
+for key in ["num_edges", "avg_degree", "num_isolates", "num_components", "largest_component_size", "max_degree"]:
+    vals = [d[key] for _, d in rows]
+    print()
+    print(key)
+    print("  mean:", round(stats.mean(vals), 3))
+    print("  min :", min(vals))
+    print("  max :", max(vals))
+
+best_lcc = max(rows, key=lambda x: x[1]["largest_component_size"])
+best_iso = min(rows, key=lambda x: x[1]["num_isolates"])
+
+print("\nBest largest component:")
+print("  seed:", best_lcc[0])
+print(json.dumps(best_lcc[1], indent=2))
+
+print("\nFewest isolates:")
+print("  seed:", best_iso[0])
+print(json.dumps(best_iso[1], indent=2))
+PY
