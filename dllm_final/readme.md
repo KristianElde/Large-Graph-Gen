@@ -1,4 +1,3 @@
-I just did this, is this fine?
 # Large-Scale Graph Generation with a Fine-Tuned MDLM
 
 ## Overview
