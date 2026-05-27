@@ -1,0 +1,332 @@
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+import torch
+
+
+EDGE_LIST_PROMPT = (
+    "Generate a graph in compact edge-list format. "
+    "Use exactly this syntax: N=<num_nodes>; E=(u,v),(u,v),... "
+    "Nodes are indexed from 0 to N-1. No self-loops. "
+    "Generate the graph now:"
+)
+
+
+def _num_nodes_from_graph(graph: Any) -> int:
+    edge_index = torch.as_tensor(graph.edge_index, dtype=torch.long)
+    num_nodes = getattr(graph, "num_nodes", None)
+    if num_nodes is None:
+        return int(edge_index.max().item()) + 1 if edge_index.numel() > 0 else 0
+    return int(num_nodes)
+
+
+def pyg_graph_to_edge_list_string(
+    graph: Any,
+    *,
+    undirected: bool = True,
+    labeled: bool = False,
+) -> str:
+    if labeled:
+        raise NotImplementedError("edge_list currently supports unlabeled graphs only")
+
+    edge_index = torch.as_tensor(graph.edge_index, dtype=torch.long)
+    n = _num_nodes_from_graph(graph)
+
+    edges: set[tuple[int, int]] = set()
+
+    if edge_index.numel() > 0:
+        for u, v in zip(edge_index[0].tolist(), edge_index[1].tolist()):
+            u, v = int(u), int(v)
+
+            if u == v:
+                continue
+            if not (0 <= u < n and 0 <= v < n):
+                continue
+
+            if undirected:
+                u, v = sorted((u, v))
+
+            edges.add((u, v))
+
+    edge_text = ",".join(f"({u},{v})" for u, v in sorted(edges))
+    return f"N={n}; E={edge_text}"
+
+
+class GraphEdgeListStrategy:
+    strategy: str = "edge_list"
+    prompt: str = EDGE_LIST_PROMPT
+
+    def __init__(self, tokenizer, *, undirected: bool = True, labeled: bool = False):
+        if labeled:
+            raise NotImplementedError("edge_list currently supports unlabeled graphs only")
+        self.tokenizer = tokenizer
+        self.undirected = undirected
+        self.labeled = labeled
+
+    def encode_to_text(self, graph: Any) -> str:
+        return pyg_graph_to_edge_list_string(
+            graph,
+            undirected=self.undirected,
+            labeled=self.labeled,
+        )
+
+    def encode(self, graph: Any) -> list[int]:
+        return self.tokenizer.encode(self.encode_to_text(graph), add_special_tokens=False)
+
+    def save_metadata(self, path: str | Path) -> None:
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        meta = {
+            "strategy": self.strategy,
+            "labeled": self.labeled,
+            "undirected": self.undirected,
+            "new_tokens_added": 0,
+            "embedding_resize": False,
+            "format": "N=5; E=(0,1),(1,2),(3,4)",
+            "prompt": self.prompt,
+        }
+
+        (path / "graph_lm_strategy.json").write_text(
+            json.dumps(meta, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
+def build_edge_list_strategy(
+    tokenizer,
+    *,
+    undirected: bool = True,
+    labeled: bool = False,
+    model=None,
+) -> GraphEdgeListStrategy:
+    return GraphEdgeListStrategy(
+        tokenizer,
+        undirected=undirected,
+        labeled=labeled,
+    )
+PY
+2. Patch the old graph_pt.py
+cat > /tmp/patch_old_graph_pt_edgelist.py <<'PY'
+from pathlib import Path
+import re
+import time
+
+p = Path("examples/a2d/mdlm/graph_pt.py")
+s = p.read_text()
+
+Path("broken_backup").mkdir(exist_ok=True)
+Path(f"broken_backup/graph_pt.py.before_old_edgelist.{int(time.time())}").write_text(s)
+
+if "root = Path.cwd()" in s and "edge_file = root /" in s:
+    raise SystemExit("ERROR: graph_pt.py is still the patch script, not the real old training file.")
+
+# Imports.
+if "from dllm.utils.graph_edge_list_strategy import build_edge_list_strategy" not in s:
+    marker = "from dllm.utils.graph_token_strategies import (\n"
+    if marker not in s:
+        raise SystemExit("Could not find graph_token_strategies import block.")
+    insert = "from dllm.utils.graph_edge_list_strategy import build_edge_list_strategy\n"
+    s = s.replace("from graph_evaluation import GraphEvaluatorCallback\n", insert + "from graph_evaluation import GraphEvaluatorCallback\n", 1)
+
+if "from dllm.utils.eval_utils import run_graph_generation_eval" not in s:
+    s = s.replace(
+        "from graph_evaluation import GraphEvaluatorCallback\n",
+        "from graph_evaluation import GraphEvaluatorCallback\nfrom dllm.utils.eval_utils import run_graph_generation_eval\n",
+        1,
+    )
+
+# Strategy list.
+s = re.sub(
+    r'VALID_STRATEGIES\s*=\s*\([^\)]*\)',
+    'VALID_STRATEGIES = ("original", "text_mapping", "selective_special", "edge_list")',
+    s,
+    count=1,
+)
+
+# Help text.
+s = s.replace(
+    "Choices: original | text_mapping | selective_special.",
+    "Choices: original | text_mapping | selective_special | edge_list.",
+)
+
+# Add dataset builder.
+builder_marker = "# ---------------------------------------------------------------------------\n# Main training function\n# ---------------------------------------------------------------------------"
+builder_code = r'''
+def build_token_dataset_edge_list(
+    graphs,
+    lm_strategy,
+    lm_tokenizer,
+    *,
+    max_length: int,
+    test_size: float,
+    seed: int,
+    append_eos: bool = True,
+):
+    """Build LM-token dataset from compact edge-list strings."""
+    rows = []
+
+    for graph in graphs:
+        text = lm_strategy.prompt + lm_strategy.encode_to_text(graph)
+        input_ids = lm_tokenizer.encode(text, add_special_tokens=False)
+
+        if append_eos and lm_tokenizer.eos_token_id is not None:
+            input_ids = input_ids + [lm_tokenizer.eos_token_id]
+
+        if len(input_ids) > max_length:
+            continue
+
+        rows.append(
+            {
+                "input_ids": input_ids,
+                "labels": input_ids.copy(),
+            }
+        )
+
+    if not rows:
+        raise ValueError(
+            "No edge-list graph samples survived tokenization. "
+            "Try increasing --max_length or lowering --max_nodes_per_graph."
+        )
+
+    dataset = datasets.Dataset.from_list(rows)
+    if test_size <= 0.0:
+        return datasets.DatasetDict({"train": dataset})
+
+    return dataset.train_test_split(test_size=test_size, seed=seed)
+'''
+
+if "def build_token_dataset_edge_list(" not in s:
+    s = s.replace(builder_marker, builder_code + "\n\n" + builder_marker, 1)
+
+# Add edge_list branch before final selective_special else.
+old = '''        else:
+            lm_strategy = build_lm_tokenizer_strategy(
+                "selective_special_tokens",
+                tokenizer,
+                graph_tokenizer,
+                model=model,   # resize handled inside factory
+            )
+'''
+
+new = '''        elif strategy == "edge_list":
+            lm_strategy = build_edge_list_strategy(
+                tokenizer,
+                undirected=data_args.undirected,
+                labeled=data_args.labeled_graph,
+            )
+            logger.info(
+                f"[edge_list] Graphs serialised as compact edge lists. "
+                f"Vocab size unchanged: {len(tokenizer)}"
+            )
+            tokenized_dataset = build_token_dataset_edge_list(
+                graphs,
+                lm_strategy,
+                tokenizer,
+                max_length=data_args.max_length,
+                test_size=data_args.test_size,
+                seed=training_args.seed,
+                append_eos=data_args.append_eos,
+            )
+
+        else:
+            lm_strategy = build_lm_tokenizer_strategy(
+                "selective_special_tokens",
+                tokenizer,
+                graph_tokenizer,
+                model=model,   # resize handled inside factory
+            )
+'''
+
+if 'elif strategy == "edge_list":' not in s:
+    if old not in s:
+        raise SystemExit("Could not find selective_special else block.")
+    s = s.replace(old, new, 1)
+
+# Skip old callback for edge_list; use eval_utils instead.
+old_callback = '''    trainer.add_callback(
+        GraphEvaluatorCallback(
+            trainer=trainer,
+            graph_tokenizer=graph_tokenizer,
+            train_data=evaluator_train_data,
+            token_strategy=graph_metadata["token_strategy"],
+            lm_strategy=lm_strategy,
+            graph_token_offset=graph_metadata["graph_token_offset"],
+            graph_vocab_size=graph_metadata["graph_vocab_size"],
+            generation_batch_size=training_args.graph_eval_generation_batch_size,
+            num_generated_graphs=training_args.graph_eval_num_generated_graphs,
+            steps=training_args.graph_eval_steps,
+            max_new_tokens=training_args.graph_eval_max_new_tokens,
+            block_size=training_args.graph_eval_block_size,
+            temperature=training_args.graph_eval_temperature,
+        )
+    )
+'''
+
+new_callback = '''    if strategy != "edge_list":
+        trainer.add_callback(
+            GraphEvaluatorCallback(
+                trainer=trainer,
+                graph_tokenizer=graph_tokenizer,
+                train_data=evaluator_train_data,
+                token_strategy=graph_metadata["token_strategy"],
+                lm_strategy=lm_strategy,
+                graph_token_offset=graph_metadata["graph_token_offset"],
+                graph_vocab_size=graph_metadata["graph_vocab_size"],
+                generation_batch_size=training_args.graph_eval_generation_batch_size,
+                num_generated_graphs=training_args.graph_eval_num_generated_graphs,
+                steps=training_args.graph_eval_steps,
+                max_new_tokens=training_args.graph_eval_max_new_tokens,
+                block_size=training_args.graph_eval_block_size,
+                temperature=training_args.graph_eval_temperature,
+            )
+        )
+'''
+
+if old_callback in s:
+    s = s.replace(old_callback, new_callback, 1)
+elif 'if strategy != "edge_list":' not in s:
+    raise SystemExit("Could not find GraphEvaluatorCallback block.")
+
+# Add edge-list eval after training, before final save or after save.
+old_end = '''    trainer.train()
+
+    checkpoint_dir = os.path.join(training_args.output_dir, "checkpoint-final")
+    trainer.save_model(checkpoint_dir)
+    trainer.processing_class.save_pretrained(checkpoint_dir)
+'''
+
+new_end = '''    trainer.train()
+
+    checkpoint_dir = os.path.join(training_args.output_dir, "checkpoint-final")
+    trainer.save_model(checkpoint_dir)
+    trainer.processing_class.save_pretrained(checkpoint_dir)
+
+    if strategy == "edge_list":
+        eval_split = tokenized_dataset.get("test", tokenized_dataset["train"])
+        run_graph_generation_eval(
+            model=model,
+            tokenizer=tokenizer,
+            eval_dataset=eval_split,
+            strategy=lm_strategy,
+            output_dir=training_args.output_dir,
+            max_new_tokens=training_args.graph_eval_max_new_tokens,
+            num_samples=training_args.graph_eval_num_generated_graphs,
+            temperature=training_args.graph_eval_temperature,
+            batch_size=training_args.graph_eval_generation_batch_size,
+            labeled=data_args.labeled_graph,
+            undirected=data_args.undirected,
+        )
+'''
+
+if "if strategy == \"edge_list\":" not in s[s.find("trainer.train()"):]:
+    if old_end not in s:
+        raise SystemExit("Could not find trainer.train/save block.")
+    s = s.replace(old_end, new_end, 1)
+
+p.write_text(s)
+print("Patched old graph_pt.py with edge_list support.")

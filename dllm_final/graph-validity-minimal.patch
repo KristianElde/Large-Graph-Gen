@@ -1,0 +1,286 @@
+--- /mnt/data/dllm_src/dllm/dllm/utils/graph_dict_strategy.py	2026-05-23 16:55:22.752878646 +0000
++++ /mnt/data/dllm_minimal_patch/dllm/utils/graph_dict_strategy.py	2026-05-23 17:06:12.012699559 +0000
+@@ -6,6 +6,123 @@
+ 
+ import torch
+ 
++# ---------------------------------------------------------------------------
++# Generation text extraction + structural validity checks
++# ---------------------------------------------------------------------------
++
++def extract_graph_dict_text(text: str) -> str:
++    """
++    Extract the graph dictionary from a generated string.
++
++    The model is conditioned with an English prompt followed by the graph, so
++    generation/evaluation often sees text like::
++
++        "A graph is represented ... format:{0: [1], 1: []}"
++
++    The parser below only understands the dictionary part.  This helper returns
++    the substring beginning at the first ``{`` and, when possible, ending at the
++    matching closing ``}``.
++    """
++    if not text:
++        return ""
++
++    start = text.find("{")
++    if start == -1:
++        return ""
++
++    depth = 0
++    in_string = False
++    prev = ""
++    for i, ch in enumerate(text[start:], start=start):
++        if ch == '"' and prev != "\\":
++            in_string = not in_string
++        if not in_string:
++            if ch == "{":
++                depth += 1
++            elif ch == "}":
++                depth -= 1
++                if depth == 0:
++                    return text[start : i + 1].strip()
++        prev = ch
++
++    # No matching final brace. Return the candidate so the parser can still
++    # recover partial adjacency, but strict validity should mark it invalid.
++    return text[start:].strip()
++
++
++def graph_dict_text_is_complete(text: str) -> bool:
++    """Return True only if ``text`` contains a balanced outer graph dict."""
++    graph_text = extract_graph_dict_text(text)
++    if not graph_text.startswith("{") or not graph_text.endswith("}"):
++        return False
++
++    depth = 0
++    in_string = False
++    prev = ""
++    for ch in graph_text:
++        if ch == '"' and prev != "\\":
++            in_string = not in_string
++        if not in_string:
++            if ch == "{":
++                depth += 1
++            elif ch == "}":
++                depth -= 1
++                if depth < 0:
++                    return False
++        prev = ch
++    return depth == 0 and not in_string
++
++
++def is_valid_adjacency(
++    adjacency: dict[int, list[int]],
++    *,
++    undirected: bool = True,
++    require_contiguous_nodes: bool = True,
++    allow_self_loops: bool = False,
++) -> tuple[bool, str]:
++    """
++    Strict graph validity check for generated adjacency dictionaries.
++
++    This is intentionally stricter than "did the parser recover at least one
++    node?".  A generated graph is valid only if all node ids are well-formed,
++    all neighbors refer to declared nodes, neighbor lists contain no duplicates,
++    and, for undirected datasets, every edge has its reverse edge.
++    """
++    if not adjacency:
++        return False, "empty adjacency"
++
++    nodes = set(adjacency.keys())
++    if not all(isinstance(n, int) for n in nodes):
++        return False, "non-integer node id"
++
++    if require_contiguous_nodes:
++        expected = set(range(max(nodes) + 1))
++        if nodes != expected:
++            missing = sorted(expected - nodes)[:10]
++            return False, f"node ids are not contiguous from 0; missing={missing}"
++
++    for u, nbrs in adjacency.items():
++        if not isinstance(nbrs, list):
++            return False, f"neighbors for node {u} are not a list"
++        if not all(isinstance(v, int) for v in nbrs):
++            return False, f"neighbors for node {u} contain non-integer ids"
++        if len(nbrs) != len(set(nbrs)):
++            return False, f"duplicate neighbors for node {u}"
++
++        for v in nbrs:
++            if v not in nodes:
++                return False, f"dangling edge {u}->{v}; node {v} is not declared"
++            if not allow_self_loops and v == u:
++                return False, f"self-loop at node {u}"
++
++    if undirected:
++        for u, nbrs in adjacency.items():
++            for v in nbrs:
++                if u not in adjacency.get(v, []):
++                    return False, f"asymmetric edge {u}->{v}; missing {v}->{u}"
++
++    return True, "ok"
++
+ 
+ # ---------------------------------------------------------------------------
+ # PyG graph → adjacency dict data structures
+--- /mnt/data/dllm_src/dllm/dllm/utils/eval_utils.py	2026-05-23 16:55:22.751662586 +0000
++++ /mnt/data/dllm_minimal_patch/dllm/utils/eval_utils.py	2026-05-23 17:06:13.866822599 +0000
+@@ -261,31 +261,54 @@
+     text: str,
+     labeled: bool,
+     strategy,
++    *,
++    undirected: bool = True,
+ ) -> dict[str, Any]:
+     """
+-    Run ``dict_string_to_adjacency`` on a completed generation and return a
+-    structured result dict.  Never raises — validation errors are recorded in
+-    the ``valid`` field.
++    Parse a completed generation and run strict graph validity checks.
++
++    The generated text may contain the natural-language prompt before the graph
++    dictionary.  We first extract the substring beginning at the first ``{``;
++    otherwise valid samples can be incorrectly scored as invalid.
+     """
+-    from dllm.utils.graph_dict_strategy import dict_string_to_adjacency
++    from dllm.utils.graph_dict_strategy import (
++        dict_string_to_adjacency,
++        extract_graph_dict_text,
++        graph_dict_text_is_complete,
++        is_valid_adjacency,
++    )
++
++    graph_text = extract_graph_dict_text(text)
++    complete_dict = graph_dict_text_is_complete(graph_text)
+ 
+     try:
+         node_order, adjacency, node_types, edge_types = dict_string_to_adjacency(
+-            text, labeled=labeled
++            graph_text, labeled=labeled
+         )
+-        valid = len(adjacency) > 0
++        structure_valid, validity_error = is_valid_adjacency(
++            adjacency,
++            undirected=undirected,
++            require_contiguous_nodes=True,
++            allow_self_loops=False,
++        )
++        valid = complete_dict and structure_valid
++        if not complete_dict:
++            validity_error = "incomplete or unbalanced graph dict"
+     except Exception as exc:
+         logger.debug(f"Parse error: {exc!r}  text={text[:120]!r}")
+         node_order, adjacency, node_types, edge_types = [], {}, {}, {}
+         valid = False
++        validity_error = f"parse error: {exc!r}"
+ 
+     # Serialise to plain Python dicts (JSON-safe keys)
+     return {
+-        "valid"      : valid,
+-        "num_nodes"  : len(adjacency),
+-        "adjacency"  : {str(k): v for k, v in adjacency.items()},
+-        "node_types" : {str(k): v for k, v in node_types.items()},
+-        "edge_types" : {f"{s},{d}": t for (s, d), t in edge_types.items()},
++        "valid"         : valid,
++        "validity_error": validity_error,
++        "graph_text"    : graph_text,
++        "num_nodes"     : len(adjacency),
++        "adjacency"     : {str(k): v for k, v in adjacency.items()},
++        "node_types"    : {str(k): v for k, v in node_types.items()},
++        "edge_types"    : {f"{s},{d}": t for (s, d), t in edge_types.items()},
+     }
+ 
+ 
+@@ -309,6 +332,7 @@
+     filename: str          = "graph_generation_eval.json",
+     generation_mode: str   = "sample",          # ← new
+     sampler_config         = None,              # ← new, optional MDLMSamplerConfig
++    undirected: bool       = True,
+ ) -> None:
+     """
+     Run the post-training graph generation evaluation and write results to disk.
+@@ -431,7 +455,9 @@
+         for orig_idx, prefix_ids, prefix_text, gen_text in zip(
+             batch_orig_indices, batch_prefix_ids, batch_prefix_texts, completed_texts
+         ):
+-            parsed = _parse_completion(gen_text, labeled, strategy)
++            parsed = _parse_completion(
++                gen_text, labeled, strategy, undirected=undirected
++            )
+ 
+             # Count nodes visible in the prefix (rough: count ': [' or ': {')
+             sep = ': {"t":' if labeled else ': ['
+@@ -441,7 +467,9 @@
+                 "index"            : orig_idx,
+                 "prefix_text"      : prefix_text,
+                 "generated_text"   : gen_text,
++                "graph_text"       : parsed["graph_text"],
+                 "valid"            : parsed["valid"],
++                "validity_error"   : parsed["validity_error"],
+                 "num_nodes_prefix" : num_nodes_prefix,
+                 "num_nodes_output" : parsed["num_nodes"],
+                 "adjacency"        : parsed["adjacency"],
+--- /mnt/data/dllm_src/dllm/examples/a2d/mdlm/graph_pt.py	2026-05-23 16:55:22.758911956 +0000
++++ /mnt/data/dllm_minimal_patch/examples/a2d/mdlm/graph_pt.py	2026-05-23 17:06:15.884058987 +0000
+@@ -27,7 +27,7 @@
+ 
+ logger = dllm.utils.get_default_logger(__name__)
+ 
+-VALID_STRATEGIES = ("original", "text_mapping", "selective_special")
++VALID_STRATEGIES = ("text_dict", "original", "text_mapping", "selective_special")
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -53,11 +53,12 @@
+     dataset_name: str | None = None
+     disable_caching: bool = False
+     token_strategy: str = field(
+-        default="selective_special",
++        default="text_dict",
+         metadata={
+             "help": (
+                 "How to map graph tokens to LLM token ids. "
+-                "Choices: original | text_mapping | selective_special. "
++                "Choices: text_dict | original | text_mapping | selective_special. "
++                "'text_dict'         — current adjacency-dictionary text format. "
+                 "'original'          — shift all graph ids into a reserved embedding block. "
+                 "'text_mapping'      — render every graph token as text, no new tokens added. "
+                 "'selective_special' — add only 6 structural tokens as special tokens "
+@@ -400,7 +401,16 @@
+         # except Exception:
+         #     logger.exception("Failed to estimate graph token lengths vs model context")
+ 
+-        ######## New strategy ##########
++        # --- Strategy-specific setup ----------------------------------
++        strategy = data_args.token_strategy
++
++        if strategy != "text_dict":
++            raise NotImplementedError(
++                "This graph_pt.py currently wires only --token_strategy text_dict. "
++                "The old graph-token strategies are still in the file but are commented "
++                "out, so allowing them would silently run the wrong experiment."
++            )
++
+         lm_strategy = build_text_dict_strategy(tokenizer, labeled=data_args.labeled_graph)
+         tokenized_dataset = build_token_dataset_new(
+             graphs,
+@@ -411,9 +421,7 @@
+             seed=training_args.seed,
+             # prompt=GRAPH_FORMAT_PROMPT,  # default; pass a custom string to override
+         )
+-        
+-        # --- Strategy-specific setup ----------------------------------
+-        strategy = data_args.token_strategy
++
+         # lm_strategy = None   # only set for text_mapping / selective_special
+ 
+         # if strategy == "original":
+@@ -557,6 +565,7 @@
+         batch_size     = training_args.graph_eval_generation_batch_size,
+         labeled        = data_args.labeled_graph,
+         generation_mode= "sample",   # or "infill"
++        undirected     = data_args.undirected,
+     )
+     
+     trainer.processing_class.save_pretrained(checkpoint_dir)

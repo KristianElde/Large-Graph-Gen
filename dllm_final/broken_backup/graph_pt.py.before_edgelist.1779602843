@@ -1,0 +1,106 @@
+from pathlib import Path
+import re
+import time
+
+p = Path("examples/a2d/mdlm/graph_pt.py")
+s = p.read_text()
+
+Path("broken_backup").mkdir(exist_ok=True)
+Path(f"broken_backup/graph_pt.py.before_edgelist.{int(time.time())}").write_text(s)
+
+# 1. Add edge-list import.
+if "graph_edge_list_strategy" not in s:
+    old = "from dllm.utils.graph_dict_strategy import build_text_dict_strategy, build_dataset_from_pyg_graphs\n"
+    new = old + "from dllm.utils.graph_edge_list_strategy import build_edge_list_strategy\n"
+    if old not in s:
+        raise SystemExit("Could not find graph_dict_strategy import in graph_pt.py")
+    s = s.replace(old, new, 1)
+
+# 2. Add edge_list to VALID_STRATEGIES.
+s = re.sub(
+    r"VALID_STRATEGIES\s*=\s*\([^\)]*\)",
+    'VALID_STRATEGIES = ("original", "text_mapping", "selective_special", "text_dict", "edge_list")',
+    s,
+    count=1,
+)
+
+# 3. Patch the hardcoded text_dict dataset construction.
+old_block = '''        lm_strategy = build_text_dict_strategy(tokenizer, labeled=data_args.labeled_graph)
+        tokenized_dataset = build_token_dataset_new(
+            graphs,
+            lm_strategy,
+            tokenizer,
+            max_length=data_args.max_length,
+            test_size=data_args.test_size,
+            seed=training_args.seed,
+            # prompt=GRAPH_FORMAT_PROMPT,  # default; pass a custom string to override
+        )
+'''
+
+new_block = '''        if data_args.token_strategy == "edge_list":
+            lm_strategy = build_edge_list_strategy(
+                tokenizer,
+                undirected=data_args.undirected,
+                labeled=data_args.labeled_graph,
+            )
+            prompt = lm_strategy.prompt
+            logger.info(
+                f"[edge_list] Graphs serialised as compact edge lists. "
+                f"Vocab size unchanged: {len(tokenizer)}"
+            )
+        elif data_args.token_strategy == "text_dict":
+            lm_strategy = build_text_dict_strategy(tokenizer, labeled=data_args.labeled_graph)
+            prompt = GRAPH_FORMAT_PROMPT
+            logger.info(
+                f"[text_dict] Graphs serialised as adjacency dict strings. "
+                f"Vocab size unchanged: {len(tokenizer)}"
+            )
+        else:
+            # Keep the old strategies available only if their original code path still handles them.
+            # If they reach this branch, they are not wired into this patched text path.
+            raise ValueError(
+                f"Unsupported token_strategy for this graph text path: {data_args.token_strategy}. "
+                "Use 'text_dict' or 'edge_list'."
+            )
+
+        tokenized_dataset = build_token_dataset_new(
+            graphs,
+            lm_strategy,
+            tokenizer,
+            max_length=data_args.max_length,
+            test_size=data_args.test_size,
+            seed=training_args.seed,
+            prompt=prompt,
+        )
+'''
+
+if old_block in s:
+    s = s.replace(old_block, new_block, 1)
+elif 'if data_args.token_strategy == "edge_list"' in s:
+    print("edge_list dataset-construction block already present")
+else:
+    raise SystemExit(
+        "Could not find the hardcoded text_dict block. Run:\n"
+        "grep -n \"build_text_dict_strategy\\|build_token_dataset_new\" -C 8 examples/a2d/mdlm/graph_pt.py"
+    )
+
+# 4. Ensure metadata is saved.
+if "lm_strategy.save_metadata(training_args.output_dir)" not in s:
+    anchor = "trainer.save_model(os.path.join(training_args.output_dir, \"checkpoint-final\"))"
+    if anchor in s:
+        s = s.replace(
+            anchor,
+            anchor + "\n    if lm_strategy is not None and hasattr(lm_strategy, \"save_metadata\"):\n        lm_strategy.save_metadata(training_args.output_dir)",
+            1,
+        )
+
+# 5. Ensure eval call passes undirected.
+if "undirected      = data_args.undirected" not in s:
+    s = s.replace(
+        "        labeled        = data_args.labeled_graph,\n",
+        "        labeled        = data_args.labeled_graph,\n        undirected      = data_args.undirected,\n",
+        1,
+    )
+
+p.write_text(s)
+print("Patched graph_pt.py for --token_strategy edge_list")

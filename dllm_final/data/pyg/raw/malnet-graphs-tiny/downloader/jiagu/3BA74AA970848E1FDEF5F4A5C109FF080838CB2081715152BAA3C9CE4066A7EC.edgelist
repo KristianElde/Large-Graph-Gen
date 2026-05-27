@@ -1,0 +1,62 @@
+# Directed graph (each unordered pair of nodes is saved once)
+# Function call graph of malicious Android APK
+# SHA-256: 3BA74AA970848E1FDEF5F4A5C109FF080838CB2081715152BAA3C9CE4066A7EC
+# Nodes: 50, Edges: 57
+# FromNodeId	ToNodeId
+1	2
+3	4
+3	5
+3	6
+7	3
+7	59
+8	9
+8	10
+8	11
+8	12
+8	13
+8	14
+8	15
+8	16
+8	17
+8	18
+8	19
+8	4
+8	20
+8	21
+8	22
+8	23
+8	24
+8	25
+8	26
+22	34
+22	35
+22	36
+22	37
+27	8
+27	29
+27	33
+27	38
+27	12
+27	42
+27	21
+27	48
+27	14
+27	39
+27	49
+27	50
+27	51
+27	52
+27	53
+27	54
+27	55
+27	4
+29	30
+29	31
+29	32
+29	4
+38	39
+38	36
+38	40
+38	35
+38	41
+38	42
