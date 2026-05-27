@@ -1,3 +1,4 @@
+I just did this, is this fine?
 # Large-Scale Graph Generation with a Fine-Tuned MDLM
 
 ## Overview
@@ -9,7 +10,7 @@ To improve generation, we added an edge-list representation:
 ```text
 N=<number_of_nodes>; M=<number_of_edges>; E=(u,v),(u,v),...
 
-to train:
+## training:
 
 CUDA_VISIBLE_DEVICES=0 python -m accelerate.commands.launch --num_processes 1 \
   examples/a2d/mdlm/graph_pt.py \
