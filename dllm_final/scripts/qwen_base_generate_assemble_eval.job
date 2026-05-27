@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=qwen_base_graph_eval
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=14:00:00
+#SBATCH --chdir=/gpfs/home3/scur0503/dllm
+#SBATCH --output=outputs/qwen_base_graph_eval_%A.out
+#SBATCH --error=outputs/qwen_base_graph_eval_%A.err
+
+set -euo pipefail
+
+mkdir -p outputs
+
+module purge
+module load 2024
+module load GCC/13.3.0
+module load Miniconda3/24.7.1-0
+module load Mamba/24.9.0-0
+
+source "$(conda info --base)/etc/profile.d/conda.sh"
+set +u
+conda activate dllm
+set -u
+
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=.
+export WANDB_MODE=disabled
+export NCCL_ASYNC_ERROR_HANDLING=1
+export TOKENIZERS_PARALLELISM=false
+
+MODEL_PATH=".models/a2d/Qwen3-0.6B"
+NUM_GRAPHS=1000
+NUM_ASSEMBLED=50
+TARGET_NODES=5000
+BASE_OUT=".models/debug/qwen3-base-noft-graph-eval"
+GEN_OUT="${BASE_OUT}/generated"
+ASSEMBLED_OUT="${BASE_OUT}/assembled_${NUM_ASSEMBLED}"
+METRICS_OUT="${BASE_OUT}/evaluation_metrics.json"
+
+echo "===== Job info ====="
+echo "Host: $(hostname)"
+echo "Date: $(date)"
+echo "Repo: $(pwd)"
+echo "Python: $(which python)"
+python -V
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+echo "MODEL_PATH=${MODEL_PATH}"
+echo "NUM_GRAPHS=${NUM_GRAPHS}"
+echo "NUM_ASSEMBLED=${NUM_ASSEMBLED}"
+echo "TARGET_NODES=${TARGET_NODES}"
+echo "BASE_OUT=${BASE_OUT}"
+echo "===================="
+
+if [[ ! -f "${MODEL_PATH}/config.json" ]]; then
+  echo "ERROR: ${MODEL_PATH}/config.json not found." >&2
+  exit 1
+fi
+
+python -m pip show accelerate >/dev/null || {
+  echo "ERROR: accelerate is not installed inside the active conda env." >&2
+  exit 1
+}
+
+echo "===== Compile checks ====="
+python -m py_compile \
+  scripts/generate_from_checkpoint.py \
+  scripts/assemble.py \
+  scripts/evaluate_graphs.py
+
+mkdir -p "${GEN_OUT}" "${ASSEMBLED_OUT}"
+
+echo "===== Generating graph samples with base Qwen ====="
+python scripts/generate_from_checkpoint.py \
+  --model_path "${MODEL_PATH}" \
+  --output_dir "${GEN_OUT}" \
+  --num_graphs "${NUM_GRAPHS}" \
+  --num_nodes "${TARGET_NODES}" \
+  --max_new_tokens 512 \
+  --temperature 0.1 \
+  --batch_size 1
+
+EVAL_JSON="${GEN_OUT}/graph_generation_eval.json"
+if [[ ! -f "${EVAL_JSON}" ]]; then
+  echo "ERROR: expected generation output not found: ${EVAL_JSON}" >&2
+  exit 1
+fi
+
+echo "===== Assembling large graphs ====="
+for SEED in $(seq 0 $((NUM_ASSEMBLED - 1))); do
+  python scripts/assemble.py \
+    --eval_json "${EVAL_JSON}" \
+    --target_nodes "${TARGET_NODES}" \
+    --out_dir "${ASSEMBLED_OUT}/graph_seed_${SEED}" \
+    --seed "${SEED}" \
+    --min_chunk_nodes 2
+done
+
+echo "===== Evaluating assembled graphs ====="
+python scripts/evaluate_graphs.py \
+  --generated_graph_dir "${ASSEMBLED_OUT}" \
+  --out_json "${METRICS_OUT}" \
+  --reference_dataset "MalNetTiny" \
+  --data_root "./data/pyg" \
+  --reference_max_graphs 512 \
+  --reference_max_nodes_per_graph 6000 \
+  --malnet_num_hops 2
+
+echo "===== Evaluation summary ====="
+python - <<'PY'
+import json
+from pathlib import Path
+
+p = Path(".models/debug/qwen3-base-noft-graph-eval/evaluation_metrics.json")
+if not p.exists():
+    raise SystemExit(f"ERROR: No evaluation_metrics.json found at {p}")
+
+d = json.loads(p.read_text())
+print("validity_rate:", d.get("validity_rate"))
+print("structural_summary:")
+print(json.dumps(d.get("structural_summary", {}), indent=2))
+print("uniqueness_novelty:")
+print(json.dumps(d.get("uniqueness_novelty", {}), indent=2))
+print("mmd:")
+print(json.dumps(d.get("mmd", {}), indent=2))
+PY

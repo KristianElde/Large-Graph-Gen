@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=malnettiny_edgelist_h100
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=14:00:00
+#SBATCH --chdir=/gpfs/home3/scur0503/dllm
+#SBATCH --output=outputs/malnettiny_edgelist_h100_%A.out
+#SBATCH --error=outputs/malnettiny_edgelist_h100_%A.err
+
+set -euo pipefail
+
+module purge
+module load 2024
+module load GCC/13.3.0
+module load Miniconda3/24.7.1-0
+module load Mamba/24.9.0-0
+
+source "$(conda info --base)/etc/profile.d/conda.sh"
+set +u
+conda activate dllm
+set -u
+
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=.
+export WANDB_MODE=disabled
+export NCCL_ASYNC_ERROR_HANDLING=1
+export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+OUTDIR=".models/debug/graph-mdlm-malnettiny-edgelist-h100-v1"
+
+echo "===== Job info ====="
+echo "Host: $(hostname)"
+echo "Date: $(date)"
+echo "Repo: $(pwd)"
+echo "Python: $(which python)"
+python -V
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+echo "OUTDIR=${OUTDIR}"
+echo "===================="
+
+python -m pip show accelerate >/dev/null || {
+  echo "ERROR: accelerate is not installed inside the active conda env." >&2
+  exit 1
+}
+
+if [[ ! -f .models/a2d/Qwen3-0.6B/config.json ]]; then
+  echo "ERROR: .models/a2d/Qwen3-0.6B/config.json not found." >&2
+  exit 1
+fi
+
+echo "===== Checking edge_list patch ====="
+python - <<'PY'
+from pathlib import Path
+
+text = Path("examples/a2d/mdlm/graph_pt.py").read_text()
+
+checks = [
+    '"edge_list"',
+    "build_edge_list_strategy",
+    "build_token_dataset_edge_list",
+    "run_graph_generation_eval",
+]
+
+missing = [c for c in checks if c not in text]
+
+if missing:
+    raise SystemExit(f"ERROR: graph_pt.py is missing edge_list patch pieces: {missing}")
+
+print("Patch check: edge_list support is present in graph_pt.py")
+PY
+
+echo "===== Checking edge-list strategy import ====="
+python - <<'PY'
+from dllm.utils.graph_edge_list_strategy import build_edge_list_strategy, EDGE_LIST_PROMPT
+print("EDGE_LIST_PROMPT:", EDGE_LIST_PROMPT)
+print("edge-list import ok")
+PY
+
+echo "===== Compile check ====="
+python -m py_compile \
+  dllm/utils/eval_utils.py \
+  dllm/utils/graph_edge_list_strategy.py \
+  examples/a2d/mdlm/graph_pt.py
+
+echo "===== Running MalNetTiny edge-list H100 training/eval ====="
+CUDA_VISIBLE_DEVICES=0 python -m accelerate.commands.launch --num_processes 1 \
+  examples/a2d/mdlm/graph_pt.py \
+  --model_name_or_path ".models/a2d/Qwen3-0.6B" \
+  --pyg_dataset "elliptic" \
+  --data_root "./data/pyg" \
+  --token_strategy "edge_list" \
+  --elliptic_num_hops 2 \
+  --max_graphs 64 \
+  --test_size 0.25 \
+  --max_nodes_per_graph 6000 \
+  --max_length 8192 \
+  --num_train_epochs 1 \
+  --max_steps 100 \
+  --learning_rate 3e-5 \
+  --per_device_train_batch_size 1 \
+  --per_device_eval_batch_size 1 \
+  --gradient_accumulation_steps 8 \
+  --gradient_checkpointing true \
+  --eval_strategy "no" \
+  --save_strategy "no" \
+  --logging_steps 10 \
+  --report_to "none" \
+  --graph_eval_num_generated_graphs 8 \
+  --graph_eval_generation_batch_size 1 \
+  --graph_eval_max_new_tokens 512 \
+  --graph_eval_temperature 0.1 \
+  --output_dir ".models/debug/graph-mdlm-elliptic-edgelist-probe"
+
+echo "===== Graph generation summary ====="
+python - <<'PY'
+import json
+from pathlib import Path
+
+p = Path(".models/debug/graph-mdlm-malnettiny-edgelist-h100-v1/graph_generation_eval.json")
+if not p.exists():
+    raise SystemExit(f"ERROR: No graph_generation_eval.json found at {p}")
+
+d = json.loads(p.read_text())
+print(json.dumps(d.get("summary", d), indent=2))
+
+for i, s in enumerate(d.get("samples", [])[:10]):
+    print(f"\n--- sample {i} ---")
+    print("raw_valid:", s.get("raw_valid"))
+    print("raw_error:", s.get("validity_error"))
+    print("repaired_valid:", s.get("repaired_valid"))
+    print("repair_error:", s.get("repair_error"))
+    print("num_nodes_output:", s.get("num_nodes_output"))
+    print("num_nodes_repaired:", s.get("num_nodes_repaired"))
+    print("graph_text:", s.get("graph_text", "")[:500])
+PY

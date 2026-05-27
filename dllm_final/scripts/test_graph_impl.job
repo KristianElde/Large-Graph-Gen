@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=test_graph_impl
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=04:00:00
+#SBATCH --output=outputs/test_graph_impl_%A.out
+#SBATCH --error=outputs/test_graph_impl_%A.err
+
+set -euo pipefail
+
+mkdir -p outputs
+
+# 1. Environment
+module purge
+module load 2024
+module load GCC/13.3.0
+module load Miniconda3/24.7.1-0
+module load Mamba/24.9.0-0
+
+# 2. Activate the environment created by scripts/install_env.job
+echo "Activating environment..."
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate dllm-env
+
+# 3. Isolate repository imports
+unset PYTHONPATH
+export PYTHONPATH=.
+export PYTHONNOUSERSITE=1
+
+# 4. Run the graph implementation tests
+echo "Running graph tokenization tests..."
+python -m pytest scripts/tests/test_graph_data.py
+
+echo "Graph implementation test complete!"

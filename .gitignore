@@ -140,4 +140,4 @@ dmypy.json
 
 /data
 *.out
-*.err
+*.err.Rhistory
